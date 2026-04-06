@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: volt-bot
+    runtime: python
+    plan: free
+    region: singapore # 한국과 가까운 싱가포르 추천
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false # Render 대시보드에서 직접 입력하거나 전역 설정 사용
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
