@@ -127,6 +127,12 @@ def init_db():
             )
             """
         )
+        cur.execute(
+            """
+            ALTER TABLE volt_rank
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()
+            """
+        )
         conn.commit()
     return True
 
@@ -427,10 +433,10 @@ class EditListView(View):
 
 class PostGameView(View):
     def __init__(self, match_id: int):
-        super().__init__(timeout=None)
+        super().__init__(timeout=600)
         self.match_id = match_id
 
-    @discord.ui.button(label="명단 수정", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="명단 수정", style=discord.ButtonStyle.primary, custom_id="volt_postgame_edit_list")
     async def edit_list_btn(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(
             "제외할 인원을 클릭하세요.",
@@ -438,7 +444,7 @@ class PostGameView(View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="내전 종료", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="내전 종료", style=discord.ButtonStyle.danger, custom_id="volt_postgame_close_match")
     async def close_match(self, interaction: discord.Interaction, button: Button):
         match = manager.get_match(self.match_id)
         if match and match.announcement_channel_id and match.announcement_message_id:
@@ -926,36 +932,45 @@ async def 결과기록(ctx: commands.Context, match_id: int, win_team: int):
         return
 
     lose_team = 2 if win_team == 1 else 1
-    with closing(conn), closing(conn.cursor()) as cur:
-        for player in teams[f"team{win_team}"]:
-            cur.execute(
-                """
-                INSERT INTO volt_rank (user_id, name, wins, points, activity_points, updated_at)
-                VALUES (%s, %s, 1, %s, %s, NOW())
-                ON CONFLICT (user_id) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    wins = volt_rank.wins + 1,
-                    points = volt_rank.points + EXCLUDED.points,
-                    activity_points = volt_rank.activity_points + EXCLUDED.activity_points,
-                    updated_at = NOW()
-                """,
-                (str(player["user_id"]), player["name"], POINTS_WIN, POINTS_ACTIVITY),
-            )
+    try:
+        with closing(conn), closing(conn.cursor()) as cur:
+            for player in teams[f"team{win_team}"]:
+                cur.execute(
+                    """
+                    INSERT INTO volt_rank (user_id, name, wins, points, activity_points, updated_at)
+                    VALUES (%s, %s, 1, %s, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        wins = volt_rank.wins + 1,
+                        points = volt_rank.points + EXCLUDED.points,
+                        activity_points = volt_rank.activity_points + EXCLUDED.activity_points,
+                        updated_at = NOW()
+                    """,
+                    (str(player["user_id"]), player["name"], POINTS_WIN, POINTS_ACTIVITY),
+                )
 
-        for player in teams[f"team{lose_team}"]:
-            cur.execute(
-                """
-                INSERT INTO volt_rank (user_id, name, losses, activity_points, updated_at)
-                VALUES (%s, %s, 1, %s, NOW())
-                ON CONFLICT (user_id) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    losses = volt_rank.losses + 1,
-                    activity_points = volt_rank.activity_points + EXCLUDED.activity_points,
-                    updated_at = NOW()
-                """,
-                (str(player["user_id"]), player["name"], POINTS_ACTIVITY),
-            )
-        conn.commit()
+            for player in teams[f"team{lose_team}"]:
+                cur.execute(
+                    """
+                    INSERT INTO volt_rank (user_id, name, losses, activity_points, updated_at)
+                    VALUES (%s, %s, 1, %s, NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        losses = volt_rank.losses + 1,
+                        activity_points = volt_rank.activity_points + EXCLUDED.activity_points,
+                        updated_at = NOW()
+                    """,
+                    (str(player["user_id"]), player["name"], POINTS_ACTIVITY),
+                )
+            conn.commit()
+    except Exception as exc:
+        logger.exception("Failed to record match result for match %s", match_id)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        await ctx.send(f"DB 저장 중 오류가 발생했습니다. `{type(exc).__name__}`")
+        return
 
     await ctx.send("결과 기록이 완료되었습니다.", view=PostGameView(match_id))
 
