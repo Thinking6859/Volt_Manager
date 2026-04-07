@@ -22,6 +22,7 @@ VOLT 내전 운영을 위한 Discord 봇입니다. 내전 생성, 공지 버튼 
 
 - `DISCORD_TOKEN`: 디스코드 봇 토큰
 - `DATABASE_URL`: PostgreSQL 연결 문자열
+- `DB_SSLMODE`: Supabase 사용 시 보통 `require`
 - `PORT`: 기본값 `8080`
 - `LOG_LEVEL`: 기본값 `INFO`
 - `ALLOW_DUPLICATE_SIGNUPS`: 테스트 중에는 `true`, 정식 출시 때는 `false`
@@ -45,6 +46,7 @@ pip install -r requirements.txt && python bot.py
 
 - `DISCORD_TOKEN`
 - `DATABASE_URL`
+- `DB_SSLMODE=require`
 - `PORT=8080`
 - `LOG_LEVEL=INFO`
 - `ALLOW_DUPLICATE_SIGNUPS=true`

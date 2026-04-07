@@ -6,6 +6,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import Dict, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import discord
 import psycopg2
@@ -39,6 +40,7 @@ def keep_alive():
 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+DB_SSLMODE = os.getenv("DB_SSLMODE")
 TOKEN = os.getenv("DISCORD_TOKEN")
 KST = pytz.timezone("Asia/Seoul")
 
@@ -72,8 +74,23 @@ ALLOW_DUPLICATE_SIGNUPS = env_flag("ALLOW_DUPLICATE_SIGNUPS", default=True)
 
 
 def normalize_database_url(url: Optional[str]) -> Optional[str]:
-    if url and url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql://", 1)
+    if not url:
+        return None
+
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        return url
+
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    sslmode = DB_SSLMODE or ("require" if "supabase" in parsed.netloc.lower() else None)
+    if sslmode and "sslmode" not in query:
+        query["sslmode"] = sslmode
+        parsed = parsed._replace(query=urlencode(query))
+        return urlunparse(parsed)
+
     return url
 
 
@@ -896,7 +913,7 @@ async def 결과기록(ctx: commands.Context, match_id: int, win_team: int):
 
     conn = get_db_conn()
     if not conn:
-        await ctx.send("DB 연결 실패로 결과를 기록하지 못했습니다.")
+        await ctx.send("DB 연결 실패로 결과를 기록하지 못했습니다. Render의 `DATABASE_URL`과 `sslmode=require` 설정을 확인해주세요.")
         return
 
     lose_team = 2 if win_team == 1 else 1
