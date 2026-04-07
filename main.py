@@ -119,6 +119,8 @@ class Match:
     title: str
     waiting_list: Dict[str, PlayerEntry] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime_now_kst())
+    announcement_channel_id: Optional[int] = None
+    announcement_message_id: Optional[int] = None
 
     def has_user(self, user_id: int) -> bool:
         return any(player.user_id == user_id for player in self.waiting_list.values())
@@ -320,6 +322,7 @@ class EditListView(View):
             return
 
         player_name = match.waiting_list.pop(entry_id).name
+        await refresh_match_announcement(self.match_id)
         self.update_buttons()
         if self.children:
             await interaction.response.edit_message(
@@ -348,6 +351,21 @@ class PostGameView(View):
 
     @discord.ui.button(label="내전 종료", style=discord.ButtonStyle.danger)
     async def close_match(self, interaction: discord.Interaction, button: Button):
+        match = manager.get_match(self.match_id)
+        if match and match.announcement_channel_id and match.announcement_message_id:
+            channel = interaction.client.get_channel(match.announcement_channel_id)
+            if channel is None:
+                try:
+                    channel = await interaction.client.fetch_channel(match.announcement_channel_id)
+                except Exception:
+                    channel = None
+            if channel is not None:
+                try:
+                    message = await channel.fetch_message(match.announcement_message_id)
+                    await message.edit(content="이 내전 모집은 종료되었습니다.", view=None)
+                except Exception:
+                    logger.exception("Failed to close announcement message for match %s", self.match_id)
+
         manager.close_match(self.match_id)
         await interaction.response.edit_message(content="내전이 종료되었습니다.", view=None)
 
@@ -455,6 +473,7 @@ class PositionSelectView(View):
             sub_position,
         )
         if success:
+            await refresh_match_announcement(self.match_id)
             await interaction.response.edit_message(
                 content=f"{interaction.user.display_name}님 신청이 완료되었습니다.",
                 view=None,
@@ -543,6 +562,93 @@ def build_match_embed(match: Match):
     return embed
 
 
+def build_match_announcement_embed(match: Match):
+    embed = discord.Embed(
+        title=f"내전 모집 | {match.title}",
+        description=(
+            f"방 번호: `{match.match_id}`\n"
+            f"생성 시간: {match.created_at}\n"
+            "아래 `참여하기` 버튼을 눌러 바로 신청할 수 있습니다."
+        ),
+        color=0x5865F2,
+    )
+    players = match.list_players()
+    if players:
+        preview = "\n".join(
+            f"• {player.name} [{player.tier}] ({player.main}/{player.sub})"
+            for player in players[:10]
+        )
+        embed.add_field(
+            name=f"현재 참가자 ({len(players)}/{MATCH_CAPACITY})",
+            value=preview,
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name=f"현재 참가자 (0/{MATCH_CAPACITY})",
+            value="아직 신청자가 없습니다.",
+            inline=False,
+        )
+    embed.set_footer(text="중복 신청은 자동으로 막힙니다.")
+    return embed
+
+
+async def refresh_match_announcement(match_id: int):
+    match = manager.get_match(match_id)
+    if not match or not match.announcement_channel_id or not match.announcement_message_id:
+        return
+
+    channel = bot.get_channel(match.announcement_channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(match.announcement_channel_id)
+        except Exception:
+            logger.exception("Failed to fetch announcement channel for match %s", match_id)
+            return
+
+    try:
+        message = await channel.fetch_message(match.announcement_message_id)
+        await message.edit(
+            embed=build_match_announcement_embed(match),
+            view=MatchAnnouncementView(match_id),
+        )
+    except Exception:
+        logger.exception("Failed to refresh announcement message for match %s", match_id)
+
+
+class MatchAnnouncementView(View):
+    def __init__(self, match_id: int):
+        super().__init__(timeout=None)
+        self.match_id = match_id
+
+    @discord.ui.button(label="참여하기", style=discord.ButtonStyle.success, custom_id="volt_join_match")
+    async def join_match(self, interaction: discord.Interaction, button: Button):
+        match = manager.get_match(self.match_id)
+        if not match:
+            await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
+            return
+        if len(match.waiting_list) >= MATCH_CAPACITY:
+            await interaction.response.send_message("정원이 가득 찼습니다.", ephemeral=True)
+            return
+        if match.has_user(interaction.user.id):
+            await interaction.response.send_message("이미 이 내전에 신청되어 있습니다.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"`{self.match_id}`번 내전 신청을 진행합니다. 티어를 선택해주세요.",
+            view=TierSelectView(self.match_id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="명단 보기", style=discord.ButtonStyle.secondary, custom_id="volt_view_match_list")
+    async def view_list(self, interaction: discord.Interaction, button: Button):
+        match = manager.get_match(self.match_id)
+        if not match:
+            await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=build_match_embed(match), ephemeral=True)
+
+
 @bot.command()
 async def 신청(ctx: commands.Context):
     if not manager.matches:
@@ -554,6 +660,8 @@ async def 신청(ctx: commands.Context):
 @bot.command()
 async def 신청취소(ctx: commands.Context, match_id: int):
     success, message = manager.unregister_player(match_id, ctx.author.id)
+    if success:
+        await refresh_match_announcement(match_id)
     await ctx.send(message if success else f"취소 실패: {message}")
 
 
@@ -600,15 +708,45 @@ async def 점수표(ctx: commands.Context):
 @commands.has_permissions(administrator=True)
 async def 내전생성(ctx: commands.Context, *, title: str):
     match_id = manager.create_match(title)
+    match = manager.get_match(match_id)
+    if not match:
+        await ctx.send("내전 생성 중 오류가 발생했습니다.")
+        return
+
+    announcement = await ctx.send(
+        content="@here 내전 모집이 시작되었습니다.",
+        embed=build_match_announcement_embed(match),
+        view=MatchAnnouncementView(match_id),
+    )
+    match.announcement_channel_id = announcement.channel.id
+    match.announcement_message_id = announcement.id
+
     await ctx.send(f"내전이 생성되었습니다. 방 번호: `{match_id}` | 제목: `{title}`")
 
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 내전종료(ctx: commands.Context, match_id: int):
-    if not manager.close_match(match_id):
+    match = manager.get_match(match_id)
+    if not match:
         await ctx.send("해당 번호의 내전이 없습니다.")
         return
+
+    if match.announcement_channel_id and match.announcement_message_id:
+        channel = bot.get_channel(match.announcement_channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(match.announcement_channel_id)
+            except Exception:
+                channel = None
+        if channel is not None:
+            try:
+                message = await channel.fetch_message(match.announcement_message_id)
+                await message.edit(content="이 내전 모집은 종료되었습니다.", view=None)
+            except Exception:
+                logger.exception("Failed to close announcement message for match %s", match_id)
+
+    manager.close_match(match_id)
     await ctx.send(f"`{match_id}`번 내전이 종료되었습니다.")
 
 
