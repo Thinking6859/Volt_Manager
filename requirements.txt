@@ -1,5 +1,4 @@
 discord.py
 psycopg2-binary
 flask
-apscheduler
 pytz
