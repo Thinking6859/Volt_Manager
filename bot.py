@@ -204,6 +204,26 @@ class MatchManager:
 manager = MatchManager()
 
 
+def build_draft_pool(players: List[PlayerEntry], captain1_id: int, captain2_id: int) -> List[PlayerEntry]:
+    if not ALLOW_DUPLICATE_SIGNUPS:
+        return [player for player in players if player.user_id not in {captain1_id, captain2_id}]
+
+    pool = list(players)
+    removed_captains = set()
+    draft_pool = []
+
+    for player in pool:
+        if player.user_id == captain1_id and captain1_id not in removed_captains:
+            removed_captains.add(captain1_id)
+            continue
+        if player.user_id == captain2_id and captain2_id not in removed_captains:
+            removed_captains.add(captain2_id)
+            continue
+        draft_pool.append(player)
+
+    return draft_pool
+
+
 class RankSelectView(View):
     def __init__(self, is_all=False):
         super().__init__(timeout=60)
@@ -807,9 +827,11 @@ async def 드래프트(ctx: commands.Context, match_id: int, captain1: discord.M
         await ctx.send("캡틴은 반드시 해당 내전 신청자여야 합니다.")
         return
 
-    draft_pool = [player for player in all_players if player.user_id not in {captain1.id, captain2.id}]
+    draft_pool = build_draft_pool(all_players, captain1.id, captain2.id)
     if len(draft_pool) != 8:
-        await ctx.send("드래프트 대상 인원 수가 올바르지 않습니다. 신청 명단을 다시 확인해주세요.")
+        await ctx.send(
+            f"드래프트 대상 인원 수가 올바르지 않습니다. 현재 드래프트 가능 인원은 {len(draft_pool)}명입니다. 신청 명단을 다시 확인해주세요."
+        )
         return
 
     draft_view = DraftView(match_id, captain1, captain2, draft_pool)
