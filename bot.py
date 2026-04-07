@@ -242,6 +242,15 @@ def build_draft_pool(players: List[PlayerEntry], captain1_id: int, captain2_id: 
     return draft_pool
 
 
+def format_draft_player(player: PlayerEntry) -> str:
+    return f"{player.name} [{player.tier}] ({player.main}/{player.sub})"
+
+
+def format_draft_button_label(player: PlayerEntry) -> str:
+    label = f"[{player.tier}] {player.name} | {player.main}/{player.sub}"
+    return label[:80]
+
+
 MENTION_RE = re.compile(r"^<@!?(\d+)>$")
 
 
@@ -465,8 +474,8 @@ class DraftView(View):
         match = manager.get_match(self.match_id)
         title = match.title if match else f"{self.match_id}번 내전"
         embed = discord.Embed(title=f"{title} 드래프트", color=0x5865F2)
-        team1 = [f"캡틴: **{self.captains[0].display_name}**"] + [f"• {player.name}" for player in self.teams[0]]
-        team2 = [f"캡틴: **{self.captains[1].display_name}**"] + [f"• {player.name}" for player in self.teams[1]]
+        team1 = [f"캡틴: **{self.captains[0].display_name}**"] + [f"• {format_draft_player(player)}" for player in self.teams[0]]
+        team2 = [f"캡틴: **{self.captains[1].display_name}**"] + [f"• {format_draft_player(player)}" for player in self.teams[1]]
         embed.add_field(name="1팀", value="\n".join(team1), inline=True)
         embed.add_field(name="2팀", value="\n".join(team2), inline=True)
         if self.step < len(self.pick_seq):
@@ -480,7 +489,7 @@ class DraftView(View):
             if player.entry_id in picked_ids:
                 continue
             button = Button(
-                label=f"[{player.tier}] {player.name}",
+                label=format_draft_button_label(player),
                 style=discord.ButtonStyle.secondary,
                 custom_id=str(index),
             )
