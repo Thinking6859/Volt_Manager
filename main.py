@@ -7,7 +7,7 @@ from threading import Thread
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 
-# --- [1] 서버 및 환경 설정 ---
+# --- [1] 서버 및 DB 설정 ---
 app = Flask('')
 @app.route('/')
 def home(): return "⚡ VOLT System is Online!"
@@ -44,7 +44,7 @@ class MatchManager:
 
 manager = MatchManager()
 
-# --- [3] UI: 명단 개별 수정 (나갈 사람 클릭 삭제) ---
+# --- [3] UI: 명단 개별 수정 (제외 기능) ---
 class EditListView(View):
     def __init__(self, mid):
         super().__init__(timeout=300); self.mid = mid
@@ -55,8 +55,7 @@ class EditListView(View):
         m = manager.matches.get(self.mid)
         if not m: return
         for eid, p in m['waiting_list'].items():
-            # 버튼 라벨에 티어 정보 포함해서 누가 누군지 알기 쉽게 표시
-            btn = Button(label=f"제외: {p['name']} [{p['tier']}]", style=discord.ButtonStyle.danger, custom_id=eid)
+            btn = Button(label=f"❌ {p['name']} [{p['tier']}]", style=discord.ButtonStyle.danger, custom_id=eid)
             btn.callback = self.delete_player
             self.add_item(btn)
 
@@ -66,9 +65,9 @@ class EditListView(View):
         if m and eid in m['waiting_list']:
             p_name = m['waiting_list'].pop(eid)['name']
             self.update_buttons()
-            await interaction.response.edit_message(content=f"✅ **{p_name}** 님이 명단에서 제외되었습니다.\n남은 인원: **{len(m['waiting_list'])}/10**\n(새로 참여할 분은 `!신청`을 입력해주세요.)", view=self)
+            await interaction.response.edit_message(content=f"✅ **{p_name}** 님이 명단에서 제외되었습니다.\n현재 인원: **{len(m['waiting_list'])}/10**", view=self)
 
-# --- [4] UI: 결과 기록 후 다음 단계 선택 ---
+# --- [4] UI: 결과 기록 후 선택지 ---
 class PostGameView(View):
     def __init__(self, mid):
         super().__init__(timeout=None); self.mid = mid
@@ -77,16 +76,10 @@ class PostGameView(View):
     async def edit_list_btn(self, interaction, button):
         await interaction.response.send_message("제외할 인원을 클릭하세요. 그 외 인원은 유지됩니다.", view=EditListView(self.mid), ephemeral=True)
 
-    @discord.ui.button(label="🧹 명단 전체 초기화", style=discord.ButtonStyle.secondary, emoji="♻️")
-    async def reset_list(self, interaction, button):
-        if self.mid in manager.matches:
-            manager.matches[self.mid]['waiting_list'] = {}
-            await interaction.response.send_message(f"🔄 {self.mid}번 명단이 완전히 비워졌습니다.", ephemeral=True)
-
     @discord.ui.button(label="❌ 내전 종료", style=discord.ButtonStyle.danger, emoji="🏁")
     async def close_match(self, interaction, button):
         manager.matches.pop(self.mid, None)
-        await interaction.response.edit_message(content="🏁 모든 경기가 종료되어 내전 방이 폐쇄되었습니다. 수고하셨습니다!", view=None)
+        await interaction.response.edit_message(content="🏁 내전 방이 폐쇄되었습니다. 수고하셨습니다!", view=None)
 
 # --- [5] UI: 드래프트 (1-2-2-2-1) ---
 class DraftView(View):
@@ -99,14 +92,13 @@ class DraftView(View):
 
     def make_embed(self):
         m_title = manager.matches[self.mid]['title']
-        embed = discord.Embed(title=f"⚔️ {m_title} 팀 드래프트", color=0x5865F2)
+        embed = discord.Embed(title=f"⚔️ {m_title} 드래프트", color=0x5865F2)
         t1 = [f"🟦 **{self.captains[0].display_name}** (주장)"] + [f"• {p['name']} ({p['main']})" for p in self.teams[0]]
         t2 = [f"🟥 **{self.captains[1].display_name}** (주장)"] + [f"• {p['name']} ({p['main']})" for p in self.teams[1]]
         embed.add_field(name="1팀 (Blue)", value="\n".join(t1), inline=True)
         embed.add_field(name="2팀 (Red)", value="\n".join(t2), inline=True)
         if self.step < len(self.pick_seq):
-            curr = self.captains[self.pick_seq[self.step]]
-            embed.set_footer(text=f"지명 순서: [{curr.display_name}]님의 차례입니다.")
+            embed.set_footer(text=f"지명 순서: [{self.captains[self.pick_seq[self.step]].display_name}] 차례")
         return embed
 
     def update_buttons(self):
@@ -119,18 +111,52 @@ class DraftView(View):
 
     async def pick_callback(self, interaction):
         if interaction.user.id != self.captains[self.pick_seq[self.step]].id:
-            return await interaction.response.send_message("본인의 지명 차례가 아닙니다!", ephemeral=True)
+            return await interaction.response.send_message("본인 차례가 아닙니다!", ephemeral=True)
         self.teams[self.pick_seq[self.step]].append(self.players[int(interaction.data['custom_id'])])
         self.step += 1
         if self.step >= len(self.pick_seq):
-            f1 = [{"name": self.captains[0].display_name, "user_id": self.captains[0].id}] + self.teams[0]
-            f2 = [{"name": self.captains[1].display_name, "user_id": self.captains[1].id}] + self.teams[1]
+            f1 = [{"name":self.captains[0].display_name,"user_id":self.captains[0].id}] + self.teams[0]
+            f2 = [{"name":self.captains[1].display_name,"user_id":self.captains[1].id}] + self.teams[1]
             manager.last_teams[self.mid] = {"team1": f1, "team2": f2}
-            await interaction.response.edit_message(content="✅ **팀 구성 완료!** 인게임 방을 만들어주세요.", embed=self.make_embed(), view=None)
+            await interaction.response.edit_message(content="✅ **팀 구성 완료!**", embed=self.make_embed(), view=None)
         else:
             self.update_buttons(); await interaction.response.edit_message(embed=self.make_embed(), view=self)
 
-# --- [6] 봇 본체 및 명령어 세트 ---
+# --- [6] UI: 신청 프로세스 ---
+class PosView(View):
+    def __init__(self, mid, tier):
+        super().__init__(timeout=120); self.mid, self.tier = mid, tier
+    @discord.ui.select(placeholder="주 라인 선택", options=[discord.SelectOption(label=l, value=l) for l in ["탑","정글","미드","원딜","서폿"]])
+    async def main_callback(self, interaction, select):
+        self.main = select.values[0]; self.clear_items()
+        sub = Select(placeholder="부 라인 선택", options=[discord.SelectOption(label=l, value=l) for l in ["탑","정글","미드","원딜","서폿","상관없음"]])
+        sub.callback = self.final_callback; self.add_item(sub)
+        await interaction.response.edit_message(content=f"부 라인을 선택하세요. (주라인: {self.main})", view=self)
+    async def final_callback(self, interaction):
+        m = manager.matches.get(self.mid)
+        if m:
+            eid = str(uuid.uuid4())
+            m['waiting_list'][eid] = {"user_id": interaction.user.id, "name": interaction.user.display_name, "tier": self.tier, "main": self.main, "sub": interaction.data['values'][0], "time": datetime.now()}
+            await interaction.response.edit_message(content=f"🎉 {m['title']} 신청 완료!", view=None)
+
+class TierSelectView(View):
+    def __init__(self, mid):
+        super().__init__(timeout=60); self.mid = mid
+    @discord.ui.select(placeholder="티어 선택", options=[discord.SelectOption(label=t, value=t) for t in TIER_DATA.keys()])
+    async def tier_callback(self, interaction, select):
+        await interaction.response.send_message("주 라인 선택", view=PosView(self.mid, select.values[0]), ephemeral=True)
+
+class MatchSelectView(View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        options = [discord.SelectOption(label=f"[{id}] {m['title']}", value=str(id)) for id, m in manager.matches.items()]
+        if options:
+            select = Select(placeholder="내전 선택", options=options)
+            select.callback = self.match_selected; self.add_item(select)
+    async def match_selected(self, interaction):
+        await interaction.response.send_message(f"✅ {interaction.data['values'][0]}번 선택!", view=TierSelectView(int(interaction.data['values'][0])), ephemeral=True)
+
+# --- [7] 봇 본체 및 강화된 명령어 ---
 class VoltBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default(); intents.message_content = True; intents.members = True
@@ -139,33 +165,27 @@ class VoltBot(commands.Bot):
 
 bot = VoltBot()
 
-# [운영] 내전 생성
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 내전생성(ctx, *, title):
-    mid = manager.create_match(title)
-    embed = discord.Embed(title="🔥 새로운 내전이 열렸습니다!", description=f"**방 번호: {mid}**\n**제목: {title}**\n\n`!신청`을 입력해 참여하세요!", color=0x00ff00)
-    await ctx.send(embed=embed)
-
-# [유저] 신청 프로세스 (기존 로직 유지)
 @bot.command()
 async def 신청(ctx):
     if not manager.matches: return await ctx.send("현재 열려있는 내전이 없습니다.")
     await ctx.send("참여할 내전 번호를 선택하세요.", view=MatchSelectView())
 
-# [운영] 드래프트 시작 (명단에서 주장 제외 로직)
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 내전생성(ctx, *, title):
+    mid = manager.create_match(title)
+    await ctx.send(embed=discord.Embed(title="🔥 내전 생성 완료", description=f"**방 번호: {mid}**\n**제목: {title}**\n`!신청`으로 참여하세요!", color=0x00ff00))
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 드래프트(ctx, mid: int, cap1: discord.Member, cap2: discord.Member):
     m = manager.matches.get(mid)
-    if not m: return await ctx.send("방 번호를 확인해주세요.")
+    if not m: return await ctx.send("방이 없습니다.")
     all_p = list(m['waiting_list'].values())
-    if len(all_p) < 10: return await ctx.send(f"인원이 부족합니다. (현재 {len(all_p)}/10)")
-    
+    if len(all_p) < 10: return await ctx.send(f"인원 부족 ({len(all_p)}/10)")
     dp = [p for p in all_p if p['user_id'] not in [cap1.id, cap2.id]]
-    await ctx.send(f"🗳️ **{cap1.display_name} VS {cap2.display_name}**\n드래프트를 시작합니다!", view=DraftView(mid, cap1, cap2, dp))
+    await ctx.send(f"🗳️ {cap1.display_name} VS {cap2.display_name} 드래프트!", view=DraftView(mid, cap1, cap2, dp))
 
-# [운영] 결과 기록 및 분기점 제공
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 결과기록(ctx, mid: int, win_team: int):
@@ -175,21 +195,40 @@ async def 결과기록(ctx, mid: int, win_team: int):
     for p in teams[f'team{win_team}']: cur.execute("INSERT INTO volt_rank (user_id, name, wins, points) VALUES (%s,%s,1,10) ON CONFLICT (user_id) DO UPDATE SET wins=volt_rank.wins+1, points=volt_rank.points+10", (str(p['user_id']), p['name']))
     for p in teams[f'team{3-win_team}']: cur.execute("INSERT INTO volt_rank (user_id, name, losses, points) VALUES (%s,%s,0,5) ON CONFLICT (user_id) DO UPDATE SET losses=volt_rank.losses+1, points=volt_rank.points+5", (str(p['user_id']), p['name']))
     conn.commit(); cur.close(); conn.close()
-    
-    embed = discord.Embed(title="🏆 경기 결과 기록 완료", description=f"{win_team}팀의 승리가 반영되었습니다.\n\n**다음 단계를 선택해주세요:**", color=0xFFD700)
-    await ctx.send(embed=embed, view=PostGameView(mid))
+    await ctx.send(embed=discord.Embed(title="🏆 기록 완료", description=f"{win_team}팀 승리 반영됨. 다음 단계를 선택하세요.", color=0xFFD700), view=PostGameView(mid))
 
-# [공용] 도움말 (가독성 강화)
+@bot.command()
+async def 내랭킹(ctx):
+    conn = get_db_conn(); cur = conn.cursor()
+    cur.execute("SELECT user_id, name, points, wins, losses FROM volt_rank ORDER BY points DESC")
+    rows = cur.fetchall()
+    for i, row in enumerate(rows, 1):
+        if row[0] == str(ctx.author.id):
+            total = row[3] + row[4]
+            wr = (row[3]/total*100) if total > 0 else 0
+            embed = discord.Embed(title=f"👤 {row[1]}님의 전적", color=0x3498db)
+            embed.add_field(name="순위", value=f"{i}위", inline=True)
+            embed.add_field(name="포인트", value=f"{row[2]}pt", inline=True)
+            embed.add_field(name="승패 (승률)", value=f"{row[3]}승 {row[4]}패 ({wr:.1f}%)", inline=False)
+            cur.close(); conn.close(); return await ctx.send(embed=embed)
+    await ctx.send("기록이 없습니다."); cur.close(); conn.close()
+
+@bot.command()
+async def 전체랭킹(ctx):
+    conn = get_db_conn(); cur = conn.cursor()
+    cur.execute("SELECT name, points, wins, losses FROM volt_rank ORDER BY points DESC")
+    rows = cur.fetchall()
+    if not rows: return await ctx.send("데이터가 없습니다.")
+    rank_text = "\n".join([f"**{i}. {r[0]}** | {r[1]}pt ({r[2]}승 {r[3]}패)" for i, r in enumerate(rows, 1)])
+    await ctx.send(embed=discord.Embed(title="🏆 VOLT 전체 랭킹 현황", description=rank_text[:2000], color=0xFFD700))
+    cur.close(); conn.close()
+
 @bot.command()
 async def 도움말(ctx):
-    embed = discord.Embed(title="⚡ VOLT 클랜 시스템 사용법", color=0x3498db)
-    embed.add_field(name="🎮 일반 유저", value="`!신청`: 내전 참여 (티어/포지션 선택)\n`!랭킹`: 전적 상위 10명 확인", inline=False)
-    embed.add_field(name="🛠️ 운영진 (권한 필요)", value="`!내전생성 [제목]`: 대기방 오픈\n`!드래프트 [번호] @주장1 @주장2`: 팀 뽑기 시작\n`!결과기록 [번호] [승리팀1or2]`: 포인트 저장 및 후속 관리", inline=False)
-    embed.set_footer(text="VOLT Infrastructure Team", icon_url=ctx.me.display_avatar.url)
+    embed = discord.Embed(title="⚡ VOLT 가이드", color=0x2ecc71)
+    embed.add_field(name="👤 유저", value="`!신청`, `!내랭킹`, `!전체랭킹`", inline=False)
+    embed.add_field(name="🛠️ 운영진", value="`!내전생성`, `!드래프트 [번] @주장1 @주장2`, `!결과기록 [번] [1or2]`", inline=False)
     await ctx.send(embed=embed)
-
-# --- 상위 뷰 클래스 생략 방지 (TierSelectView 등은 위와 동일하게 구성) ---
-# (코드 가독성을 위해 필수 UI 클래스들이 모두 포함된 상태입니다.)
 
 if __name__ == "__main__":
     init_db(); keep_alive(); bot.run(TOKEN)
