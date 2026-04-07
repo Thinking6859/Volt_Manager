@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -222,6 +223,38 @@ def build_draft_pool(players: List[PlayerEntry], captain1_id: int, captain2_id: 
         draft_pool.append(player)
 
     return draft_pool
+
+
+MENTION_RE = re.compile(r"^<@!?(\d+)>$")
+
+
+async def resolve_member_argument(ctx: commands.Context, raw: str) -> Optional[discord.Member]:
+    if ctx.guild is None:
+        return None
+
+    value = raw.strip()
+    mention_match = MENTION_RE.match(value)
+    member_id = int(mention_match.group(1)) if mention_match else int(value) if value.isdigit() else None
+
+    if member_id is not None:
+        member = ctx.guild.get_member(member_id)
+        if member is not None:
+            return member
+        try:
+            return await ctx.guild.fetch_member(member_id)
+        except discord.NotFound:
+            return None
+        except discord.HTTPException:
+            logger.exception("Failed to fetch guild member %s", member_id)
+            return None
+
+    lowered = value.casefold()
+    for member in ctx.guild.members:
+        candidates = [member.display_name, member.name, member.global_name]
+        if any(candidate and candidate.casefold() == lowered for candidate in candidates):
+            return member
+
+    return None
 
 
 class RankSelectView(View):
@@ -809,7 +842,14 @@ async def 내전종료(ctx: commands.Context, match_id: int):
 
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def 드래프트(ctx: commands.Context, match_id: int, captain1: discord.Member, captain2: discord.Member):
+async def 드래프트(ctx: commands.Context, match_id: int, captain1_raw: str, captain2_raw: str):
+    captain1 = await resolve_member_argument(ctx, captain1_raw)
+    captain2 = await resolve_member_argument(ctx, captain2_raw)
+
+    if captain1 is None or captain2 is None:
+        await ctx.send("캡틴을 찾지 못했습니다. 실제 멘션 또는 유저 ID를 사용해주세요.")
+        return
+
     match = manager.get_match(match_id)
     if not match:
         await ctx.send("해당 번호의 내전이 없습니다.")
