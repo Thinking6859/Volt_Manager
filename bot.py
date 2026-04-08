@@ -193,12 +193,24 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS volt_operator_access (
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    granted_by TEXT,
+                    granted_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (guild_id, user_id)
+                )
+                """
+            )
             cur.execute("UPDATE volt_rank SET wins = COALESCE(wins, 0)")
             cur.execute("UPDATE volt_rank SET losses = COALESCE(losses, 0)")
             cur.execute("UPDATE volt_rank SET points = COALESCE(points, 0)")
             cur.execute("UPDATE volt_rank SET activity_points = COALESCE(activity_points, 0)")
             cur.execute("UPDATE volt_rank SET updated_at = COALESCE(updated_at, NOW())")
         conn.commit()
+        load_operator_access(conn)
         return True
     finally:
         conn.close()
@@ -249,16 +261,21 @@ class Match:
 class MatchManager:
     def __init__(self):
         self.matches: Dict[int, Match] = {}
-        self.match_count = 0
         self.last_teams: Dict[int, Dict[str, List[Dict[str, object]]]] = {}
 
     def list_matches(self) -> List[Match]:
         return [self.matches[key] for key in sorted(self.matches.keys())]
 
+    def next_match_id(self) -> int:
+        next_id = 1
+        while next_id in self.matches:
+            next_id += 1
+        return next_id
+
     def create_match(self, title: str) -> int:
-        self.match_count += 1
-        self.matches[self.match_count] = Match(match_id=self.match_count, title=title)
-        return self.match_count
+        match_id = self.next_match_id()
+        self.matches[match_id] = Match(match_id=match_id, title=title)
+        return match_id
 
     def get_match(self, match_id: int) -> Optional[Match]:
         return self.matches.get(match_id)
@@ -300,6 +317,159 @@ class MatchManager:
 
 
 manager = MatchManager()
+operator_access: Dict[int, set[int]] = {}
+
+
+def load_operator_access(conn=None):
+    should_close = conn is None
+    if conn is None:
+        conn = get_db_conn()
+    if not conn:
+        return False
+
+    loaded: Dict[int, set[int]] = {}
+    try:
+        with closing(conn.cursor()) as cur:
+            cur.execute("SELECT guild_id, user_id FROM volt_operator_access")
+            for guild_id_raw, user_id_raw in cur.fetchall():
+                guild_id = int(guild_id_raw)
+                user_id = int(user_id_raw)
+                loaded.setdefault(guild_id, set()).add(user_id)
+        operator_access.clear()
+        operator_access.update(loaded)
+        return True
+    finally:
+        if should_close:
+            conn.close()
+
+
+def list_operator_ids(guild_id: int) -> List[int]:
+    return sorted(operator_access.get(guild_id, set()))
+
+
+def grant_operator_access(guild_id: int, user_id: int, granted_by: int):
+    conn = get_db_conn()
+    if not conn:
+        return False, "DB 연결에 실패해 운영권한을 저장하지 못했습니다."
+
+    try:
+        with closing(conn.cursor()) as cur:
+            cur.execute(
+                """
+                INSERT INTO volt_operator_access (guild_id, user_id, granted_by, granted_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (guild_id, user_id) DO UPDATE SET
+                    granted_by = EXCLUDED.granted_by,
+                    granted_at = NOW()
+                """,
+                (str(guild_id), str(user_id), str(granted_by)),
+            )
+        conn.commit()
+    except Exception:
+        logger.exception("Failed to grant operator access for guild %s user %s", guild_id, user_id)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, "운영권한 저장 중 오류가 발생했습니다."
+    finally:
+        conn.close()
+
+    operator_access.setdefault(guild_id, set()).add(user_id)
+    return True, "운영권한을 부여했습니다."
+
+
+def revoke_operator_access(guild_id: int, user_id: int):
+    conn = get_db_conn()
+    if not conn:
+        return False, "DB 연결에 실패해 운영권한을 회수하지 못했습니다."
+
+    try:
+        with closing(conn.cursor()) as cur:
+            cur.execute(
+                "DELETE FROM volt_operator_access WHERE guild_id = %s AND user_id = %s",
+                (str(guild_id), str(user_id)),
+            )
+            removed = cur.rowcount > 0
+        conn.commit()
+    except Exception:
+        logger.exception("Failed to revoke operator access for guild %s user %s", guild_id, user_id)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, "운영권한 회수 중 오류가 발생했습니다."
+    finally:
+        conn.close()
+
+    operator_access.setdefault(guild_id, set()).discard(user_id)
+    if not removed:
+        return False, "부여된 운영권한 기록이 없습니다."
+    return True, "운영권한을 회수했습니다."
+
+
+def is_discord_admin(member: Optional[discord.abc.User]) -> bool:
+    guild_permissions = getattr(member, "guild_permissions", None)
+    return bool(guild_permissions and guild_permissions.administrator)
+
+
+def has_control_access(member: Optional[discord.abc.User]) -> bool:
+    if member is None:
+        return False
+    if is_discord_admin(member):
+        return True
+    guild = getattr(member, "guild", None)
+    if guild is None:
+        return False
+    return member.id in operator_access.get(guild.id, set())
+
+
+def access_level_label(member: Optional[discord.abc.User]) -> str:
+    if is_discord_admin(member):
+        return "서버 관리자"
+    if has_control_access(member):
+        return "봇 운영진"
+    return "일반 유저"
+
+
+async def require_control_access_interaction(interaction: discord.Interaction, feature_name: str = "이 기능") -> bool:
+    if has_control_access(interaction.user):
+        return True
+    await interaction.response.send_message(
+        f"{feature_name}은 서버 관리자 또는 봇 운영권한이 있는 멤버만 사용할 수 있습니다.",
+        ephemeral=True,
+    )
+    return False
+
+
+async def require_discord_admin_interaction(interaction: discord.Interaction, feature_name: str = "이 기능") -> bool:
+    if is_discord_admin(interaction.user):
+        return True
+    await interaction.response.send_message(
+        f"{feature_name}은 서버 관리자만 사용할 수 있습니다.",
+        ephemeral=True,
+    )
+    return False
+
+
+async def require_control_access_ctx(ctx: commands.Context, feature_name: str = "이 기능") -> bool:
+    if ctx.guild is None:
+        await ctx.send(f"{feature_name}은 서버 채널에서만 사용할 수 있습니다.")
+        return False
+    if has_control_access(ctx.author):
+        return True
+    await ctx.send(f"{feature_name}은 서버 관리자 또는 봇 운영권한이 있는 멤버만 사용할 수 있습니다.")
+    return False
+
+
+async def require_discord_admin_ctx(ctx: commands.Context, feature_name: str = "이 기능") -> bool:
+    if ctx.guild is None:
+        await ctx.send(f"{feature_name}은 서버 채널에서만 사용할 수 있습니다.")
+        return False
+    if is_discord_admin(ctx.author):
+        return True
+    await ctx.send(f"{feature_name}은 서버 관리자만 사용할 수 있습니다.")
+    return False
 
 
 def format_player(player: PlayerEntry) -> str:
@@ -352,15 +522,17 @@ async def resolve_member_from_text(guild: Optional[discord.Guild], raw: str) -> 
     return None
 
 
-def build_main_panel_embed(user: discord.abc.User, is_admin: bool) -> discord.Embed:
+def build_main_panel_embed(user: discord.abc.User, can_manage: bool) -> discord.Embed:
     embed = discord.Embed(
         title="VOLT 컨트롤 패널",
         description=(
-            f"{user.display_name}님, 아래 버튼으로 내전 기능을 바로 조작할 수 있습니다.\n"
-            "시작 명령어는 `!1` 입니다."
+            f"{user.display_name}님, 아래 패널에서 내전 기능을 바로 조작할 수 있습니다.\n"
+            "시작 명령어는 `!1`이며, 유저 기능과 운영 기능을 한 화면에서 열 수 있습니다."
         ),
         color=0x5865F2,
     )
+    embed.add_field(name="현재 권한", value=access_level_label(user), inline=True)
+    embed.add_field(name="열린 내전", value=f"{len(manager.list_matches())}개", inline=True)
     embed.add_field(
         name="유저 기능",
         value="참여 신청, 신청 취소, 내전 목록, 명단 보기, 랭킹 조회, 점수 확인",
@@ -368,35 +540,94 @@ def build_main_panel_embed(user: discord.abc.User, is_admin: bool) -> discord.Em
     )
     embed.add_field(
         name="운영 기능",
-        value="내전 생성, 명단 수정, 공지 새로고침, 드래프트, 결과 기록, 내전 삭제",
+        value="내전 생성, 명단 수정, 공지 새로고침, 드래프트, 결과 기록, 내전 삭제, 운영권한 관리",
         inline=False,
     )
-    embed.set_footer(text="운영 패널은 관리자만 사용할 수 있습니다." if is_admin else "관리자 권한이 있으면 운영 패널도 열 수 있습니다.")
+    embed.set_footer(
+        text=(
+            "운영 패널 접근 가능"
+            if can_manage
+            else "운영 패널은 서버 관리자 또는 봇 운영권한이 있는 멤버만 사용할 수 있습니다."
+        )
+    )
     return embed
 
 
 def build_help_embed() -> discord.Embed:
     embed = discord.Embed(
         title="VOLT 사용 안내",
-        description="이제 대부분의 기능은 `!1` 패널에서 버튼과 선택 메뉴로 조작할 수 있습니다.",
+        description="대부분의 기능은 `!1` 패널에서 버튼과 선택 메뉴로 처리할 수 있습니다.",
         color=0x2ECC71,
     )
     embed.add_field(
-        name="가장 쉬운 사용법",
-        value="`!1` 입력 후 버튼으로 이동\n참여 신청, 신청 취소, 명단 보기, 랭킹 조회 가능",
+        name="1. 유저 사용 흐름",
+        value="`!1` → 참여 신청 / 신청 취소 / 명단 보기 / 랭킹",
         inline=False,
     )
     embed.add_field(
-        name="운영진 추천 흐름",
-        value="`!1` -> 운영 패널 -> 내전 생성 / 내전 관리\n관리 화면에서 명단 수정, 드래프트, 결과 기록, 삭제 가능",
+        name="2. 운영 사용 흐름",
+        value="`!1` → 운영 패널 → 내전 생성 또는 내전 관리 → 명단 수정 / 드래프트 / 결과 기록 / 삭제",
+        inline=False,
+    )
+    embed.add_field(
+        name="3. 운영권한",
+        value="서버 관리자는 일반 멤버에게 봇 운영권한을 부여하거나 회수할 수 있습니다.",
         inline=False,
     )
     embed.add_field(
         name="백업 명령어",
-        value="`!내전생성` `!드래프트` `!결과기록` 같은 텍스트 명령어도 계속 사용 가능합니다.",
+        value="`!내전생성`, `!운영권한부여`, `!드래프트`, `!결과기록` 같은 텍스트 명령어도 계속 사용할 수 있습니다.",
         inline=False,
     )
     embed.set_footer(text="테스트 중에는 ALLOW_DUPLICATE_SIGNUPS=true, 정식 출시 때는 false")
+    return embed
+
+
+def build_operator_access_embed(guild: Optional[discord.Guild]) -> discord.Embed:
+    embed = discord.Embed(
+        title="운영권한 관리",
+        description="서버 관리자 권한이 없는 멤버에게 봇 운영 패널 접근 권한을 부여하거나 회수할 수 있습니다.",
+        color=0x8E44AD,
+    )
+    if guild is None:
+        embed.add_field(name="현재 상태", value="서버 정보를 찾을 수 없습니다.", inline=False)
+        return embed
+
+    operator_lines = []
+    for user_id in list_operator_ids(guild.id):
+        member = guild.get_member(user_id)
+        operator_lines.append(member.mention if member else f"`{user_id}`")
+
+    embed.add_field(
+        name="현재 위임된 운영진",
+        value="\n".join(operator_lines[:20]) if operator_lines else "현재 위임된 운영진이 없습니다.",
+        inline=False,
+    )
+    embed.add_field(
+        name="권한 범위",
+        value="운영 패널 접근, 내전 생성/수정/삭제, 드래프트, 결과 기록",
+        inline=False,
+    )
+    embed.set_footer(text="서버 관리자는 항상 전체 권한을 가지며, 이 화면은 서버 관리자만 열 수 있습니다.")
+    return embed
+
+
+def build_admin_panel_embed(member: Optional[discord.abc.User]) -> discord.Embed:
+    guild = getattr(member, "guild", None)
+    operator_count = len(list_operator_ids(guild.id)) if guild else 0
+    embed = discord.Embed(
+        title="VOLT 운영 패널",
+        description="내전 생성부터 공지 관리, 드래프트, 결과 기록, 운영권한 관리까지 여기서 처리할 수 있습니다.",
+        color=0xE67E22,
+    )
+    embed.add_field(name="현재 권한", value=access_level_label(member), inline=True)
+    embed.add_field(name="위임 운영진", value=f"{operator_count}명", inline=True)
+    embed.add_field(
+        name="빠른 작업",
+        value="내전 생성, 내전 관리, 운영권한 관리, 목록 확인, 도움말",
+        inline=False,
+    )
+    embed.set_footer(text="서버 관리자는 운영권한 부여/회수 가능 | 위임 운영진도 내전 운영 기능 사용 가능")
     return embed
 
 
@@ -416,9 +647,10 @@ def build_match_list_embed(matches: List[Match]) -> discord.Embed:
         return embed
 
     embed.description = "\n".join(
-        f"• `{match.match_id}`번 | {match.title} | {len(match.waiting_list)}/{MATCH_CAPACITY}명"
+        f"• `{match.match_id}`번 | {match.title} | {len(match.waiting_list)}/{MATCH_CAPACITY}명 | 남은 자리 {MATCH_CAPACITY - len(match.waiting_list)}"
         for match in matches
     )
+    embed.set_footer(text="삭제된 번호는 다음 생성 시 자동으로 재사용됩니다.")
     return embed
 
 
@@ -443,12 +675,20 @@ def build_match_embed(match: Match) -> discord.Embed:
 def build_manage_embed(match: Match) -> discord.Embed:
     embed = discord.Embed(
         title=f"운영 패널 | {match.title}",
-        description=f"방 번호: `{match.match_id}` | 현재 인원: {len(match.waiting_list)}/{MATCH_CAPACITY}",
+        description=(
+            f"방 번호: `{match.match_id}` | 현재 인원: {len(match.waiting_list)}/{MATCH_CAPACITY}\n"
+            f"남은 자리: {MATCH_CAPACITY - len(match.waiting_list)}"
+        ),
         color=0xE67E22,
     )
     embed.add_field(
         name="관리 기능",
         value="명단 보기, 명단 수정, 공지 새로고침, 드래프트 시작, 결과 기록, 내전 삭제",
+        inline=False,
+    )
+    embed.add_field(
+        name="운영 팁",
+        value="드래프트는 정확히 10명이 모였을 때 시작되고, 결과 기록은 드래프트 완료 후 사용할 수 있습니다.",
         inline=False,
     )
     if match.list_players():
@@ -736,6 +976,8 @@ class EditListView(View):
             self.add_item(button)
 
     async def delete_player(self, interaction: discord.Interaction):
+        if not await require_control_access_interaction(interaction, "명단 수정"):
+            return
         match = manager.get_match(self.match_id)
         entry_id = interaction.data["custom_id"]
         if not match or entry_id not in match.waiting_list:
@@ -885,6 +1127,8 @@ class MatchPickerView(View):
             await interaction.response.send_message(embed=build_match_embed(match), ephemeral=True)
             return
 
+        if not await require_control_access_interaction(interaction, "내전 관리"):
+            return
         await interaction.response.send_message(
             embed=build_manage_embed(match),
             view=MatchManageView(match_id),
@@ -899,6 +1143,8 @@ class ConfirmDeleteMatchView(View):
 
     @discord.ui.button(label="삭제 확인", style=discord.ButtonStyle.danger, row=0)
     async def confirm(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "내전 삭제"):
+            return
         match = manager.get_match(self.match_id)
         if not match:
             await interaction.response.edit_message(content="이미 삭제된 내전입니다.", view=None)
@@ -928,6 +1174,8 @@ class CaptainOneSelectView(View):
         self.add_item(select)
 
     async def select_first(self, interaction: discord.Interaction):
+        if not await require_control_access_interaction(interaction, "드래프트"):
+            return
         captain1_id = int(interaction.data["values"][0])
         await interaction.response.send_message(
             "두 번째 캡틴을 선택하세요.",
@@ -953,6 +1201,8 @@ class CaptainTwoSelectView(View):
         self.add_item(select)
 
     async def select_second(self, interaction: discord.Interaction):
+        if not await require_control_access_interaction(interaction, "드래프트"):
+            return
         match = manager.get_match(self.match_id)
         if not match:
             await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
@@ -1022,6 +1272,8 @@ class ResultTeamSelectView(View):
         await self.record(interaction, 2)
 
     async def record(self, interaction: discord.Interaction, win_team: int):
+        if not await require_control_access_interaction(interaction, "결과 기록"):
+            return
         success, message = await record_match_result(self.match_id, win_team)
         if success:
             await interaction.response.send_message(message, view=MatchManageView(self.match_id))
@@ -1036,6 +1288,8 @@ class MatchManageView(View):
 
     @discord.ui.button(label="명단 보기", style=discord.ButtonStyle.secondary, row=0)
     async def view_roster(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "명단 보기"):
+            return
         match = manager.get_match(self.match_id)
         if not match:
             await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
@@ -1044,6 +1298,8 @@ class MatchManageView(View):
 
     @discord.ui.button(label="명단 수정", style=discord.ButtonStyle.primary, row=0)
     async def edit_roster(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "명단 수정"):
+            return
         match = manager.get_match(self.match_id)
         if not match:
             await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
@@ -1055,6 +1311,8 @@ class MatchManageView(View):
 
     @discord.ui.button(label="공지 새로고침", style=discord.ButtonStyle.secondary, row=0)
     async def refresh_notice(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "공지 새로고침"):
+            return
         match = manager.get_match(self.match_id)
         if not match:
             await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
@@ -1064,6 +1322,8 @@ class MatchManageView(View):
 
     @discord.ui.button(label="드래프트", style=discord.ButtonStyle.success, row=1)
     async def start_draft(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "드래프트"):
+            return
         match = manager.get_match(self.match_id)
         if not match:
             await interaction.response.send_message("이미 종료되었거나 존재하지 않는 내전입니다.", ephemeral=True)
@@ -1075,6 +1335,8 @@ class MatchManageView(View):
 
     @discord.ui.button(label="결과 기록", style=discord.ButtonStyle.success, row=1)
     async def record_result(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "결과 기록"):
+            return
         if self.match_id not in manager.last_teams:
             await interaction.response.send_message("먼저 드래프트를 완료해주세요.", ephemeral=True)
             return
@@ -1082,11 +1344,152 @@ class MatchManageView(View):
 
     @discord.ui.button(label="내전 삭제", style=discord.ButtonStyle.danger, row=1)
     async def delete_match(self, interaction: discord.Interaction, button: Button):
+        if not await require_control_access_interaction(interaction, "내전 삭제"):
+            return
         await interaction.response.send_message(
             f"`{self.match_id}`번 내전을 삭제할까요?",
             view=ConfirmDeleteMatchView(self.match_id),
             ephemeral=True,
         )
+
+
+def eligible_operator_grant_members(guild: Optional[discord.Guild]) -> List[discord.Member]:
+    if guild is None:
+        return []
+    candidates = [
+        member
+        for member in guild.members
+        if not member.bot and not has_control_access(member)
+    ]
+    return sorted(candidates, key=lambda member: member.display_name.casefold())
+
+
+def eligible_operator_revoke_members(guild: Optional[discord.Guild]) -> List[discord.Member]:
+    if guild is None:
+        return []
+    candidates = [
+        member
+        for member in guild.members
+        if not member.bot and not is_discord_admin(member) and member.id in operator_access.get(guild.id, set())
+    ]
+    return sorted(candidates, key=lambda member: member.display_name.casefold())
+
+
+class OperatorGrantSelectView(View):
+    def __init__(self, guild: Optional[discord.Guild]):
+        super().__init__(timeout=180)
+        members = eligible_operator_grant_members(guild)
+        options = [
+            discord.SelectOption(label=member.display_name[:100], value=str(member.id), description=member.name[:100])
+            for member in members[:MAX_SELECT_OPTIONS]
+        ]
+        select = Select(
+            placeholder="운영권한을 부여할 멤버를 선택하세요.",
+            options=options or [discord.SelectOption(label="부여 가능한 멤버가 없습니다.", value="0")],
+            disabled=not options,
+        )
+        select.callback = self.handle_select
+        self.add_item(select)
+
+    async def handle_select(self, interaction: discord.Interaction):
+        if not await require_discord_admin_interaction(interaction, "운영권한 부여"):
+            return
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("서버 정보를 찾을 수 없습니다.", ephemeral=True)
+            return
+        target_id = int(interaction.data["values"][0])
+        member = guild.get_member(target_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(target_id)
+            except discord.HTTPException:
+                member = None
+        if member is None:
+            await interaction.response.send_message("대상 멤버를 찾지 못했습니다.", ephemeral=True)
+            return
+        if member.bot:
+            await interaction.response.send_message("봇 계정에는 운영권한을 부여할 수 없습니다.", ephemeral=True)
+            return
+        if has_control_access(member):
+            await interaction.response.send_message("이미 운영 패널을 사용할 수 있는 멤버입니다.", ephemeral=True)
+            return
+        success, message = grant_operator_access(guild.id, member.id, interaction.user.id)
+        await interaction.response.edit_message(
+            content=f"{member.mention} {message}" if success else message,
+            embed=build_operator_access_embed(guild),
+            view=None,
+        )
+
+
+class OperatorRevokeSelectView(View):
+    def __init__(self, guild: Optional[discord.Guild]):
+        super().__init__(timeout=180)
+        members = eligible_operator_revoke_members(guild)
+        options = [
+            discord.SelectOption(label=member.display_name[:100], value=str(member.id), description=member.name[:100])
+            for member in members[:MAX_SELECT_OPTIONS]
+        ]
+        select = Select(
+            placeholder="운영권한을 회수할 멤버를 선택하세요.",
+            options=options or [discord.SelectOption(label="회수할 운영진이 없습니다.", value="0")],
+            disabled=not options,
+        )
+        select.callback = self.handle_select
+        self.add_item(select)
+
+    async def handle_select(self, interaction: discord.Interaction):
+        if not await require_discord_admin_interaction(interaction, "운영권한 회수"):
+            return
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("서버 정보를 찾을 수 없습니다.", ephemeral=True)
+            return
+        target_id = int(interaction.data["values"][0])
+        member = guild.get_member(target_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(target_id)
+            except discord.HTTPException:
+                member = None
+        success, message = revoke_operator_access(guild.id, target_id)
+        target_label = member.mention if member else f"`{target_id}`"
+        await interaction.response.edit_message(
+            content=f"{target_label} {message}" if success else message,
+            embed=build_operator_access_embed(guild),
+            view=None,
+        )
+
+
+class OperatorAccessView(View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="권한 부여", style=discord.ButtonStyle.success, row=0)
+    async def grant_access(self, interaction: discord.Interaction, button: Button):
+        if not await require_discord_admin_interaction(interaction, "운영권한 부여"):
+            return
+        await interaction.response.send_message(
+            "운영권한을 부여할 멤버를 선택하세요.",
+            view=OperatorGrantSelectView(interaction.guild),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="권한 회수", style=discord.ButtonStyle.danger, row=0)
+    async def revoke_access(self, interaction: discord.Interaction, button: Button):
+        if not await require_discord_admin_interaction(interaction, "운영권한 회수"):
+            return
+        await interaction.response.send_message(
+            "운영권한을 회수할 멤버를 선택하세요.",
+            view=OperatorRevokeSelectView(interaction.guild),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="권한 목록", style=discord.ButtonStyle.secondary, row=0)
+    async def list_access(self, interaction: discord.Interaction, button: Button):
+        if not await require_discord_admin_interaction(interaction, "운영권한 목록"):
+            return
+        await interaction.response.send_message(embed=build_operator_access_embed(interaction.guild), ephemeral=True)
 
 
 class MatchAnnouncementView(View):
@@ -1132,8 +1535,7 @@ class MatchAnnouncementView(View):
 
     @discord.ui.button(label="운영 메뉴", style=discord.ButtonStyle.primary, row=1)
     async def manage_match(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("운영 메뉴는 관리자만 사용할 수 있습니다.", ephemeral=True)
+        if not await require_control_access_interaction(interaction, "운영 메뉴"):
             return
         match = manager.get_match(self.match_id)
         if not match:
@@ -1145,6 +1547,8 @@ class CreateMatchModal(Modal, title="내전 생성"):
     title_input = TextInput(label="내전 제목", placeholder="예: 저녁 8시 내전", max_length=100)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if not await require_control_access_interaction(interaction, "내전 생성"):
+            return
         title = str(self.title_input).strip()
         if not title:
             await interaction.response.send_message("내전 제목을 입력해주세요.", ephemeral=True)
@@ -1176,23 +1580,31 @@ class AdminPanelView(View):
 
     @discord.ui.button(label="내전 생성", style=discord.ButtonStyle.success, row=0)
     async def create_match(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("이 기능은 관리자만 사용할 수 있습니다.", ephemeral=True)
+        if not await require_control_access_interaction(interaction, "내전 생성"):
             return
         await interaction.response.send_modal(CreateMatchModal())
 
     @discord.ui.button(label="내전 관리", style=discord.ButtonStyle.primary, row=0)
     async def manage_match(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("이 기능은 관리자만 사용할 수 있습니다.", ephemeral=True)
+        if not await require_control_access_interaction(interaction, "내전 관리"):
             return
         await interaction.response.send_message("관리할 내전을 선택하세요.", view=MatchPickerView("manage"), ephemeral=True)
 
-    @discord.ui.button(label="내전 목록", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="권한 관리", style=discord.ButtonStyle.primary, row=1)
+    async def manage_access(self, interaction: discord.Interaction, button: Button):
+        if not await require_discord_admin_interaction(interaction, "운영권한 관리"):
+            return
+        await interaction.response.send_message(
+            embed=build_operator_access_embed(interaction.guild),
+            view=OperatorAccessView(),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="내전 목록", style=discord.ButtonStyle.secondary, row=1)
     async def list_matches(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(embed=build_match_list_embed(manager.list_matches()), ephemeral=True)
 
-    @discord.ui.button(label="도움말", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="도움말", style=discord.ButtonStyle.secondary, row=1)
     async def show_help(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message(embed=build_help_embed(), ephemeral=True)
 
@@ -1248,10 +1660,13 @@ class MainPanelView(View):
 
     @discord.ui.button(label="운영 패널", style=discord.ButtonStyle.primary, row=2)
     async def admin_menu(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("운영 패널은 관리자만 사용할 수 있습니다.", ephemeral=True)
+        if not await require_control_access_interaction(interaction, "운영 패널"):
             return
-        await interaction.response.send_message("운영 패널을 열었습니다.", view=AdminPanelView(), ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_admin_panel_embed(interaction.user),
+            view=AdminPanelView(),
+            ephemeral=True,
+        )
 
 
 class VoltBot(commands.Bot):
@@ -1274,7 +1689,7 @@ bot = VoltBot()
 @bot.command(name="1")
 async def open_panel(ctx: commands.Context):
     await ctx.send(
-        embed=build_main_panel_embed(ctx.author, ctx.author.guild_permissions.administrator),
+        embed=build_main_panel_embed(ctx.author, has_control_access(ctx.author)),
         view=MainPanelView(),
     )
 
@@ -1332,8 +1747,9 @@ async def score_command(ctx: commands.Context):
 
 
 @bot.command(name="내전생성")
-@commands.has_permissions(administrator=True)
 async def create_match_command(ctx: commands.Context, *, title: str):
+    if not await require_control_access_ctx(ctx, "내전 생성"):
+        return
     match_id = manager.create_match(title)
     match = manager.get_match(match_id)
     if not match:
@@ -1350,8 +1766,9 @@ async def create_match_command(ctx: commands.Context, *, title: str):
 
 
 @bot.command(name="내전삭제")
-@commands.has_permissions(administrator=True)
 async def delete_match_command(ctx: commands.Context, match_id: int):
+    if not await require_control_access_ctx(ctx, "내전 삭제"):
+        return
     match = manager.get_match(match_id)
     if not match:
         await ctx.send("해당 번호의 내전이 없습니다.")
@@ -1362,14 +1779,16 @@ async def delete_match_command(ctx: commands.Context, match_id: int):
 
 
 @bot.command(name="내전종료")
-@commands.has_permissions(administrator=True)
 async def close_match_command(ctx: commands.Context, match_id: int):
+    if not await require_control_access_ctx(ctx, "내전 종료"):
+        return
     await delete_match_command(ctx, match_id)
 
 
 @bot.command(name="명단수정")
-@commands.has_permissions(administrator=True)
 async def edit_roster_command(ctx: commands.Context, match_id: int = None):
+    if not await require_control_access_ctx(ctx, "명단 수정"):
+        return
     if match_id is None:
         await ctx.send("관리할 내전을 선택하세요.", view=MatchPickerView("manage"))
         return
@@ -1384,8 +1803,9 @@ async def edit_roster_command(ctx: commands.Context, match_id: int = None):
 
 
 @bot.command(name="드래프트")
-@commands.has_permissions(administrator=True)
 async def draft_command(ctx: commands.Context, match_id: int, captain1_raw: str, captain2_raw: str):
+    if not await require_control_access_ctx(ctx, "드래프트"):
+        return
     match = manager.get_match(match_id)
     if not match:
         await ctx.send("해당 번호의 내전이 없습니다.")
@@ -1422,13 +1842,51 @@ async def draft_command(ctx: commands.Context, match_id: int, captain1_raw: str,
 
 
 @bot.command(name="결과기록")
-@commands.has_permissions(administrator=True)
 async def result_command(ctx: commands.Context, match_id: int, win_team: int):
+    if not await require_control_access_ctx(ctx, "결과 기록"):
+        return
     success, message = await record_match_result(match_id, win_team)
     if success:
         await ctx.send(message, view=MatchManageView(match_id))
     else:
         await ctx.send(message)
+
+
+@bot.command(name="운영권한부여")
+async def grant_operator_command(ctx: commands.Context, *, member_raw: str):
+    if not await require_discord_admin_ctx(ctx, "운영권한 부여"):
+        return
+    member = await resolve_member_from_text(ctx.guild, member_raw)
+    if member is None:
+        await ctx.send("대상 멤버를 찾지 못했습니다. 실제 멘션, 닉네임, 유저 ID 중 하나를 사용해주세요.")
+        return
+    if member.bot:
+        await ctx.send("봇 계정에는 운영권한을 부여할 수 없습니다.")
+        return
+    if has_control_access(member):
+        await ctx.send("이미 운영 패널을 사용할 수 있는 멤버입니다.")
+        return
+    success, message = grant_operator_access(ctx.guild.id, member.id, ctx.author.id)
+    await ctx.send(f"{member.mention} {message}" if success else message)
+
+
+@bot.command(name="운영권한회수")
+async def revoke_operator_command(ctx: commands.Context, *, member_raw: str):
+    if not await require_discord_admin_ctx(ctx, "운영권한 회수"):
+        return
+    member = await resolve_member_from_text(ctx.guild, member_raw)
+    if member is None:
+        await ctx.send("대상 멤버를 찾지 못했습니다. 실제 멘션, 닉네임, 유저 ID 중 하나를 사용해주세요.")
+        return
+    success, message = revoke_operator_access(ctx.guild.id, member.id)
+    await ctx.send(f"{member.mention} {message}" if success else message)
+
+
+@bot.command(name="운영권한목록")
+async def list_operator_command(ctx: commands.Context):
+    if not await require_discord_admin_ctx(ctx, "운영권한 목록"):
+        return
+    await ctx.send(embed=build_operator_access_embed(ctx.guild))
 
 
 @bot.event
@@ -1440,6 +1898,9 @@ async def on_command_error(ctx: commands.Context, error):
         await ctx.send("입력 형식이 올바르지 않습니다. 멘션 또는 숫자 값을 다시 확인해주세요.")
         return
     if isinstance(error, commands.MissingPermissions):
+        await ctx.send("이 명령어를 사용할 권한이 없습니다.")
+        return
+    if isinstance(error, commands.CheckFailure):
         await ctx.send("이 명령어를 사용할 권한이 없습니다.")
         return
     if isinstance(error, commands.CommandNotFound):
