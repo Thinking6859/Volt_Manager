@@ -1,20 +1,22 @@
-# VOLT Discord Bot
+﻿# VOLT Discord Bot
 
-VOLT 내전 운영을 위한 Discord 봇입니다. 내전 생성, 공지 버튼 참여, 신청취소, 명단 확인, 드래프트, 결과 기록, 랭킹 조회를 지원합니다.
+VOLT 내전 운영을 위한 Discord 봇입니다. 내전 생성, 공지 버튼 참여, 신청 취소, 명단 확인, 드래프트, 결과 기록, 랭킹 조회를 지원합니다.
 
 ## Features
 
-- `!내전생성 <제목>` 실행 시 자동 모집 공지 생성
-- 공지 메시지에서 `참여하기`, `신청취소`, `명단 보기` 버튼 사용 가능
-- 정원 10명 도달 시 자동 모집 마감 처리
-- `!드래프트`, `!결과기록`으로 경기 운영 가능
-- `!내랭킹`, `!전체랭킹`으로 랭킹 조회 가능
+- `!내전생성 <제목>` 실행 시 자동으로 모집 공지 생성
+- 공지 메시지에서 `참여하기`, `신청취소`, `명단 보기`, `운영 메뉴` 버튼 사용 가능
+- 정원 10명 도달 시 자동으로 모집 마감 처리
+- `!1` 입력 시 메인 패널에서 주요 기능을 버튼으로 제어 가능
+- 운영 패널에서 내전 생성, 관리, 드래프트, 결과 기록, 삭제 가능
+- `!내랭킹`, `!전체랭킹`, `!점수표`로 랭킹과 점수 확인 가능
 
 ## Files
 
 - `bot.py`: 메인 봇 코드
 - `requirements.txt`: Python 패키지 목록
 - `.env.example`: 필요한 환경변수 예시
+- `.gitignore`: 로컬 비밀값과 캐시 제외 설정
 
 ## Environment Variables
 
@@ -36,20 +38,28 @@ python bot.py
 
 ## Render Deploy
 
-Start Command 예시:
+Build Command:
 
 ```bash
-pip install -r requirements.txt && python bot.py
+pip install -r requirements.txt
 ```
 
-환경변수:
+Start Command:
 
-- `DISCORD_TOKEN`
-- `DATABASE_URL`
-- `DB_SSLMODE=require`
-- `PORT=8080`
-- `LOG_LEVEL=INFO`
-- `ALLOW_DUPLICATE_SIGNUPS=true`
+```bash
+python bot.py
+```
+
+권장 환경변수:
+
+```text
+DISCORD_TOKEN=...
+DATABASE_URL=...
+DB_SSLMODE=require
+PORT=8080
+LOG_LEVEL=INFO
+ALLOW_DUPLICATE_SIGNUPS=true
+```
 
 정식 출시 전에는 아래처럼 변경하세요.
 
@@ -61,6 +71,7 @@ ALLOW_DUPLICATE_SIGNUPS=false
 
 유저 명령어:
 
+- `!1`
 - `!신청`
 - `!신청취소 <방번호>`
 - `!내전목록`
@@ -72,12 +83,14 @@ ALLOW_DUPLICATE_SIGNUPS=false
 운영진 명령어:
 
 - `!내전생성 <제목>`
+- `!내전삭제 <방번호>`
 - `!내전종료 <방번호>`
+- `!명단수정 <방번호>`
 - `!드래프트 <방번호> <캡틴1> <캡틴2>`
 - `!결과기록 <방번호> <승리팀번호>`
 
 ## Notes
 
-- 테스트 모드에서는 같은 계정 중복 신청이 허용됩니다.
-- 정식 출시 시 반드시 `ALLOW_DUPLICATE_SIGNUPS=false`로 바꿔야 합니다.
+- 테스트 모드에서는 같은 계정 중복 신청을 허용할 수 있습니다.
+- 정식 출시 전 반드시 `ALLOW_DUPLICATE_SIGNUPS=false`로 변경하세요.
 - 실제 비밀값이 들어간 `.env` 파일은 GitHub에 올리면 안 됩니다.
