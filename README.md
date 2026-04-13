@@ -11,6 +11,8 @@ VOLT 내전 운영을 위한 Discord 봇입니다. 내전 생성, 공지 버튼 
 - 운영 패널에서 내전 생성, 관리, 드래프트, 결과 기록, 삭제 가능
 - 삭제된 내전 번호는 다음 생성 시 자동으로 재사용
 - 서버 관리자는 일반 멤버에게 봇 운영권한을 부여/회수 가능
+- `BOT_CHANNEL_ID`를 설정하면 텍스트 명령은 봇 제어 채널에서만 동작
+- `ANNOUNCEMENT_CHANNEL_ID`, `RESULT_CHANNEL_ID`를 설정하면 모집/결과 채널을 분리 가능
 - `!내랭킹`, `!전체랭킹`, `!점수표`로 랭킹과 점수 확인 가능
 
 ## Files
@@ -30,6 +32,9 @@ VOLT 내전 운영을 위한 Discord 봇입니다. 내전 생성, 공지 버튼 
 - `PORT`: 기본값 `8080`
 - `LOG_LEVEL`: 기본값 `INFO`
 - `ALLOW_DUPLICATE_SIGNUPS`: 테스트 중에는 `true`, 정식 출시 때는 `false`
+- `BOT_CHANNEL_ID`: 텍스트 명령과 `!1` 패널을 사용할 봇 제어 채널 ID
+- `ANNOUNCEMENT_CHANNEL_ID`: 내전 모집 공지를 올릴 채널 ID
+- `RESULT_CHANNEL_ID`: 결과 요약을 올릴 채널 ID
 
 ## Local Run
 
@@ -61,6 +66,9 @@ DB_SSLMODE=require
 PORT=8080
 LOG_LEVEL=INFO
 ALLOW_DUPLICATE_SIGNUPS=true
+BOT_CHANNEL_ID=123456789012345678
+ANNOUNCEMENT_CHANNEL_ID=123456789012345679
+RESULT_CHANNEL_ID=123456789012345680
 ```
 
 정식 출시 전에는 아래처럼 변경하세요.
