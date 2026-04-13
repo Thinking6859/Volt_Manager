@@ -14,8 +14,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 
 # 📢 반드시 선우 님 서버의 실제 채널 ID로 수정하세요!
-PUBLIC_CHANNEL_ID = 1493116057488199741  # 내전 모집 및 결과 공지 채널
-RANKING_CHANNEL_ID = 1493138106868568075 # 랭킹 확인 버튼 배포 채널
+PUBLIC_CHANNEL_ID = 1493205766209933404  # 내전 모집 및 결과 공지 채널
+RANKING_CHANNEL_ID = 1493205910892318850 # 랭킹 확인 버튼 배포 채널
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 intents = discord.Intents.default()
