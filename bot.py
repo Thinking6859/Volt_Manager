@@ -128,7 +128,7 @@ class JoinView(ui.View):
             await interaction.response.send_message("신청됨", ephemeral=True)
         await self.update_message()
 
-# --- [4. 드래프트 시스템] ---
+# --- [4. 드래프트 및 경기 관리] ---
 class DraftView(ui.View):
     def __init__(self, pool_data, l1, l2, admin_id, all_player_ids):
         super().__init__(timeout=None)
@@ -262,15 +262,30 @@ class MasterDashboardView(ui.View):
 
     @ui.button(label="⚙️ 운영진 관리", style=discord.ButtonStyle.secondary, row=1)
     async def btn_adm(self, interaction, button):
-        if not interaction.user.guild_permissions.administrator: return
+        # 🔒 보안: 서버 관리자 권한이 있는 사람만 이 메뉴를 열 수 있음!
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("🚫 디스코드 서버 관리자 전용 메뉴입니다.", ephemeral=True)
+        
         view = ui.View()
-        s1 = ui.Select(cls=ui.UserSelect, placeholder="임명", row=0)
-        async def c1(i): supabase.table("users").update({"is_admin": True}).eq("discord_id", s1.values[0].id).execute()
-        s1.callback = c1; view.add_item(s1)
-        s2 = ui.Select(cls=ui.UserSelect, placeholder="박탈", row=1)
-        async def c2(i): supabase.table("users").update({"is_admin": False}).eq("discord_id", s2.values[0].id).execute()
-        s2.callback = c2; view.add_item(s2)
-        await interaction.response.send_message("권한 관리:", view=view, ephemeral=True)
+        # [임명]
+        s1 = ui.Select(cls=ui.UserSelect, placeholder="👑 운영진 임명 (권한 부여)", row=0)
+        async def c1(i):
+            target = s1.values[0]
+            supabase.table("users").update({"is_admin": True}).eq("discord_id", target.id).execute()
+            await i.response.send_message(f"✅ **{target.display_name}**님을 운영진으로 임명했습니다.", ephemeral=True)
+        s1.callback = c1
+        view.add_item(s1)
+        
+        # [박탈]
+        s2 = ui.Select(cls=ui.UserSelect, placeholder="🚫 운영진 박탈 (권한 회수)", row=1)
+        async def c2(i):
+            target = s2.values[0]
+            supabase.table("users").update({"is_admin": False}).eq("discord_id", target.id).execute()
+            await i.response.send_message(f"🛑 **{target.display_name}**님의 운영진 권한을 회수했습니다.", ephemeral=True)
+        s2.callback = c2
+        view.add_item(s2)
+        
+        await interaction.response.send_message("임명하거나 박탈할 멤버를 선택하세요:", view=view, ephemeral=True)
 
 @bot.command(name="1")
 async def master(ctx):
