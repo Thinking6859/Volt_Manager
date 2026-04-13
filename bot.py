@@ -4,7 +4,6 @@ from discord.ext import commands
 from discord import ui
 from supabase import create_client, Client
 from keep_alive import keep_alive 
-import traceback
 
 # --- [1. 설정 및 환경변수] ---
 try:
@@ -85,27 +84,28 @@ class RecruitManageView(ui.View):
         super().__init__(timeout=None)
         self.join_view = join_view 
 
-    @ui.user_select(placeholder="➕ 멤버 수동 추가", row=0)
+    @ui.select(cls=ui.UserSelect, placeholder="➕ 멤버 수동 추가", row=0)
     async def add_member(self, interaction, select):
         user = select.values[0]
-        if user in self.join_view.participants: return await interaction.response.send_message("이미 있음", ephemeral=True)
+        if user in self.join_view.participants: return await interaction.response.send_message("이미 신청 명단에 있습니다.", ephemeral=True)
         self.join_view.participants.append(user)
         await self.join_view.update_message()
-        await interaction.response.send_message(f"✅ {user.display_name} 추가.", ephemeral=True)
+        await interaction.response.send_message(f"✅ {user.display_name}님을 수동으로 추가했습니다.", ephemeral=True)
 
-    @ui.user_select(placeholder="➖ 멤버 강제 퇴장", row=1)
+    @ui.select(cls=ui.UserSelect, placeholder="➖ 멤버 강제 퇴장", row=1)
     async def remove_member(self, interaction, select):
         user = select.values[0]
-        if user not in self.join_view.participants: return await interaction.response.send_message("없음", ephemeral=True)
+        if user not in self.join_view.participants: return await interaction.response.send_message("명단에 없는 멤버입니다.", ephemeral=True)
         self.join_view.participants.remove(user)
         await self.join_view.update_message()
-        await interaction.response.send_message(f"🛑 {user.display_name} 제거.", ephemeral=True)
+        await interaction.response.send_message(f"🛑 {user.display_name}님을 퇴장시켰습니다.", ephemeral=True)
 
     @ui.button(label="💣 모집판 폭파", style=discord.ButtonStyle.danger, row=2)
     async def destroy(self, interaction, button):
         self.join_view.stop()
-        await self.join_view.message.edit(content="💣 운영진에 의해 모집이 취소되었습니다.", view=None)
-        await interaction.response.edit_message(content="✅ 폭파 완료.", view=None)
+        if self.join_view.message:
+            await self.join_view.message.edit(content="💣 운영진에 의해 모집이 취소되었습니다.", view=None)
+        await interaction.response.edit_message(content="✅ 모집판을 폭파했습니다.", view=None)
 
 class JoinView(ui.View):
     def __init__(self, target):
@@ -115,8 +115,11 @@ class JoinView(ui.View):
     async def update_message(self):
         names = "\n".join([f"- {m.display_name}" for m in self.participants])
         content = f"🎮 **VOLT {self.target}인 내전 모집**\n\n**신청자 ({len(self.participants)}/{self.target}):**\n{names if names else '없음'}"
-        btn = [x for x in self.children if x.custom_id == "btn_join"][0]
-        btn.label = f"내전 참여 ({len(self.participants)}/{self.target})"
+        # 버튼 텍스트 업데이트
+        for x in self.children:
+            if isinstance(x, ui.Button) and x.custom_id == "btn_join":
+                x.label = f"내전 참여 ({len(self.participants)}/{self.target})"
+                break
         if self.message: await self.message.edit(content=content, view=self)
 
     @ui.button(label="내전 참여 신청", style=discord.ButtonStyle.success, custom_id="btn_join")
@@ -124,14 +127,14 @@ class JoinView(ui.View):
         if not self.message: self.message = interaction.message
         if interaction.user in self.participants:
             self.participants.remove(interaction.user)
-            await interaction.response.send_message("취소됨", ephemeral=True)
+            await interaction.response.send_message("참여 신청을 취소했습니다.", ephemeral=True)
         else:
-            if len(self.participants) >= self.target: return await interaction.response.send_message("꽉 참", ephemeral=True)
+            if len(self.participants) >= self.target: return await interaction.response.send_message("이미 정원이 찼습니다.", ephemeral=True)
             self.participants.append(interaction.user)
-            await interaction.response.send_message("신청됨", ephemeral=True)
+            await interaction.response.send_message("신청이 완료되었습니다!", ephemeral=True)
         await self.update_message()
 
-# --- [4. 드래프트 시스템] ---
+# --- [4. 드래프트 및 경기 관리] ---
 class DraftView(ui.View):
     def __init__(self, pool_data, l1, l2, admin_id, all_player_ids):
         super().__init__(timeout=None)
@@ -154,7 +157,7 @@ class DraftView(ui.View):
 
     async def pick_callback(self, interaction):
         if self.processing: return
-        if interaction.user.id != self.leaders[self.order[self.idx]].id: return await interaction.response.send_message("차례 아님", ephemeral=True)
+        if interaction.user.id != self.leaders[self.order[self.idx]].id: return await interaction.response.send_message("본인의 선택 순서가 아닙니다.", ephemeral=True)
         
         self.processing = True
         p_id = int(interaction.data['custom_id'])
@@ -173,7 +176,7 @@ class DraftView(ui.View):
             await self.finish(interaction)
         else:
             self.create_buttons(); self.processing = False
-            await interaction.response.edit_message(content=f"🔵 **현재 픽:** {self.leaders[self.order[self.idx]].mention}", view=self)
+            await interaction.response.edit_message(content=f"🔵 **현재 선택:** {self.leaders[self.order[self.idx]].mention}", view=self)
 
     async def finish(self, interaction):
         global last_match_teams
@@ -181,11 +184,12 @@ class DraftView(ui.View):
         last_match_teams[1], last_match_teams[2] = self.team_ids[1], self.team_ids[2]
         
         diff = abs(self.team_scores[1] - self.team_scores[2])
-        embed = discord.Embed(title="⚔️ VOLT 최종 라인업", description=f"점수차: {diff}점", color=0x5865F2)
-        embed.add_field(name=f"🟦 1팀 ({self.team_scores[1]}점)", value="\n".join(self.teams[1]))
-        embed.add_field(name=f"🟥 2팀 ({self.team_scores[2]}점)", value="\n".join(self.teams[2]))
+        embed = discord.Embed(title="⚔️ VOLT 최종 라인업", description=f"팀 전력 차이: {diff}점", color=0x5865F2)
+        embed.add_field(name=f"🟦 1팀 ({self.team_scores[1]}점)", value="\n".join(self.teams[1]), inline=True)
+        embed.add_field(name=f"🟥 2팀 ({self.team_scores[2]}점)", value="\n".join(self.teams[2]), inline=True)
         
-        await bot.get_channel(PUBLIC_CHANNEL_ID).send(embed=embed)
+        public_channel = bot.get_channel(PUBLIC_CHANNEL_ID)
+        if public_channel: await public_channel.send(embed=embed)
         await interaction.response.edit_message(content="✅ 결과 전송 완료.", view=None)
 
 # --- [5. 마스터 대시보드] ---
@@ -200,7 +204,7 @@ class MasterDashboardView(ui.View):
         reg_btn = ui.Button(label="클랜원 등록/수정", style=discord.ButtonStyle.primary)
         async def reg_callback(i):
             modal = ui.Modal(title="⚡ VOLT 멤버 정보 입력")
-            rid = ui.TextInput(label="라이엇 ID", placeholder="설 화#0920", required=True)
+            rid = ui.TextInput(label="라이엇 ID", placeholder="닉네임#태그", required=True)
             modal.add_item(rid)
             async def on_submit(i2):
                 await i2.response.send_message(f"**{rid.value}**님, 정보를 선택하세요.", view=RegisterFlow(rid.value), ephemeral=True)
@@ -208,20 +212,25 @@ class MasterDashboardView(ui.View):
             await i.response.send_modal(modal)
         reg_btn.callback = reg_callback
         reg_view.add_item(reg_btn)
-        await bot.get_channel(PUBLIC_CHANNEL_ID).send("⚡ **VOLT 클랜 플레이어 등록 센터**", view=reg_view)
+        public_channel = bot.get_channel(PUBLIC_CHANNEL_ID)
+        if public_channel: await public_channel.send("⚡ **VOLT 클랜 플레이어 등록 센터**", view=reg_view)
         await interaction.response.send_message("✅ 배포 완료", ephemeral=True)
 
     @ui.button(label="📢 내전 모집 열기", style=discord.ButtonStyle.success, row=0)
     async def btn_recruit(self, interaction, button):
         if not await is_admin(interaction): return
         view = ui.View()
-        sel = ui.Select(placeholder="인원", options=[discord.SelectOption(label=f"{x}인", value=str(x)) for x in [10, 20, 30]])
+        sel = ui.Select(placeholder="모집 인원 선택", options=[discord.SelectOption(label=f"{x}인", value=str(x)) for x in [10, 20, 30]])
         async def cb(i):
             target = int(sel.values[0])
             jv = JoinView(target)
-            msg = await bot.get_channel(PUBLIC_CHANNEL_ID).send(f"🎮 **VOLT {target}인 내전!**", view=jv)
-            jv.message = msg
-            await i.response.edit_message(content=f"✅ 모집 리모컨 활성화.", view=RecruitManageView(jv))
+            public_channel = bot.get_channel(PUBLIC_CHANNEL_ID)
+            if public_channel:
+                msg = await public_channel.send(f"🎮 **VOLT {target}인 내전!**", view=jv)
+                jv.message = msg
+                await i.response.edit_message(content=f"✅ {target}인 모집 리모컨 활성화.", view=RecruitManageView(jv))
+            else:
+                await i.response.send_message("⚠️ 공지 채널을 찾을 수 없습니다.", ephemeral=True)
         sel.callback = cb
         view.add_item(sel)
         await interaction.response.send_message("규모 선택:", view=view, ephemeral=True)
@@ -229,12 +238,12 @@ class MasterDashboardView(ui.View):
     @ui.button(label="⚔️ 드래프트 시작", style=discord.ButtonStyle.danger, row=0)
     async def btn_draft(self, interaction, button):
         if not await is_admin(interaction): return
-        if not interaction.user.voice: return await interaction.response.send_message("음성채널 필수", ephemeral=True)
+        if not interaction.user.voice: return await interaction.response.send_message("음성채널에 접속해 주세요.", ephemeral=True)
         v_members = [m for m in interaction.user.voice.channel.members if not m.bot and not (m.voice.self_mute or m.voice.mute)]
-        if len(v_members) != 10: return await interaction.response.send_message(f"마이크 켠 10명 필요", ephemeral=True)
+        if len(v_members) != 10: return await interaction.response.send_message(f"마이크를 켠 유저가 10명이어야 합니다. (현재 {len(v_members)}명)", ephemeral=True)
         
         view = ui.View()
-        sel = ui.UserSelect(placeholder="주장 2명 선택", min_values=2, max_values=2)
+        sel = ui.Select(cls=ui.UserSelect, placeholder="주장 2명 선택", min_values=2, max_values=2)
         async def sel_cb(i):
             l1, l2 = sel.values
             res = supabase.table("users").select("*").in_("discord_id", [m.id for m in v_members]).execute()
@@ -243,23 +252,23 @@ class MasterDashboardView(ui.View):
                           "lines": f"{db_data[m.id]['main_line']}/{db_data[m.id]['sub_line']}", "score": TIER_SCORE.get(db_data[m.id]['tier'], 3),
                           "p_count": db_data[m.id].get('participation_count', 0)} for m in v_members if m.id not in [l1.id, l2.id]}
             await i.channel.send(f"⚔️ **드래프트 시작!**", view=DraftView(pool, l1, l2, i.user.id, [m.id for m in v_members]))
-            await i.response.edit_message(content="✅ 생성됨", view=None)
+            await i.response.edit_message(content="✅ 드래프트판 생성 완료.", view=None)
         sel.callback = sel_cb
         view.add_item(sel)
-        await interaction.response.send_message("주장 선택:", view=view, ephemeral=True)
+        await interaction.response.send_message("주장을 선택하세요:", view=view, ephemeral=True)
 
     @ui.button(label="🏅 결과 기록 (승점)", style=discord.ButtonStyle.success, row=1)
     async def btn_win(self, interaction, button):
         if not await is_admin(interaction): return
-        if not last_match_teams[1]: return await interaction.response.send_message("기록 없음", ephemeral=True)
+        if not last_match_teams[1]: return await interaction.response.send_message("최근 드래프트 기록이 없습니다.", ephemeral=True)
         view = ui.View()
-        sel = ui.Select(placeholder="승리팀", options=[discord.SelectOption(label="1팀", value="1"), discord.SelectOption(label="2팀", value="2")])
+        sel = ui.Select(placeholder="승리팀 선택", options=[discord.SelectOption(label="1팀", value="1"), discord.SelectOption(label="2팀", value="2")])
         async def cb(i):
             for pid in last_match_teams[int(sel.values[0])]: supabase.rpc('increment_win', {'user_id': pid}).execute()
-            await i.response.edit_message(content="✅ 승리 기록완료!", view=None)
+            await i.response.edit_message(content=f"✅ {sel.values[0]}팀 승리 기록 완료!", view=None)
         sel.callback = cb
         view.add_item(sel)
-        await interaction.response.send_message("승리팀 선택:", view=view, ephemeral=True)
+        await interaction.response.send_message("결과 기록:", view=view, ephemeral=True)
 
     @ui.button(label="⚙️ 운영진 관리", style=discord.ButtonStyle.secondary, row=1)
     async def btn_adm(self, interaction, button):
@@ -267,28 +276,23 @@ class MasterDashboardView(ui.View):
             return await interaction.response.send_message("🚫 서버 관리자 권한이 필요합니다.", ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
-        try:
-            view = ui.View()
-            s1 = ui.UserSelect(placeholder="👑 운영진 임명", row=0)
-            async def c1(i):
-                await i.response.defer(ephemeral=True)
-                target = s1.values[0]
-                supabase.table("users").upsert({"discord_id": target.id, "discord_name": target.display_name, "is_admin": True}).execute()
-                await i.followup.send(f"✅ {target.display_name}님 임명 완료!", ephemeral=True)
-            s1.callback = c1; view.add_item(s1)
-            
-            s2 = ui.UserSelect(placeholder="🚫 운영진 박탈", row=1)
-            async def c2(i):
-                await i.response.defer(ephemeral=True)
-                target = s2.values[0]
-                supabase.table("users").update({"is_admin": False}).eq("discord_id", target.id).execute()
-                await i.followup.send(f"🛑 {target.display_name}님 해임 완료!", ephemeral=True)
-            s2.callback = c2; view.add_item(s2)
-            
-            await interaction.followup.send("운영진을 관리하세요:", view=view, ephemeral=True)
-        except Exception as e:
-            print(f"Error: {e}")
-            await interaction.followup.send(f"에러 발생: {e}", ephemeral=True)
+        view = ui.View()
+        s1 = ui.Select(cls=ui.UserSelect, placeholder="👑 운영진 임명", row=0)
+        async def c1(i):
+            await i.response.defer(ephemeral=True)
+            target = s1.values[0]
+            supabase.table("users").upsert({"discord_id": target.id, "discord_name": target.display_name, "is_admin": True}).execute()
+            await i.followup.send(f"✅ {target.display_name}님 임명 완료!", ephemeral=True)
+        s1.callback = c1; view.add_item(s1)
+        
+        s2 = ui.Select(cls=ui.UserSelect, placeholder="🚫 운영진 박탈", row=1)
+        async def c2(i):
+            await i.response.defer(ephemeral=True)
+            target = s2.values[0]
+            supabase.table("users").update({"is_admin": False}).eq("discord_id", target.id).execute()
+            await i.followup.send(f"🛑 {target.display_name}님 해임 완료!", ephemeral=True)
+        s2.callback = c2; view.add_item(s2)
+        await interaction.followup.send("운영진을 관리하세요:", view=view, ephemeral=True)
 
 @bot.command(name="1")
 async def master(ctx):
