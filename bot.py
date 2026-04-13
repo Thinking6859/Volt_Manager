@@ -46,7 +46,7 @@ async def is_admin(interaction: discord.Interaction):
     await interaction.response.send_message("🚫 볼티: 운영진 권한이 없습니다.", ephemeral=True)
     return False
 
-# --- [2. 등록 시스템 컴포넌트] ---
+# --- [2. 등록 시스템] ---
 class RegisterFlow(ui.View):
     def __init__(self, riot_id):
         super().__init__(timeout=180)
@@ -76,7 +76,7 @@ class RegisterFlow(ui.View):
         self.add_item(sub_select)
         await interaction.response.edit_message(content=f"✅ 주라인: {self.main_line}\n마지막으로 **부라인**을 선택하세요.", view=self)
 
-# --- [3. 모집 시스템 (원격 & 관리)] ---
+# --- [3. 모집 시스템] ---
 class RecruitManageView(ui.View):
     def __init__(self, join_view):
         super().__init__(timeout=None)
@@ -128,7 +128,7 @@ class JoinView(ui.View):
             await interaction.response.send_message("신청됨", ephemeral=True)
         await self.update_message()
 
-# --- [4. 드래프트 및 경기 관리] ---
+# --- [4. 드래프트 시스템] ---
 class DraftView(ui.View):
     def __init__(self, pool_data, l1, l2, admin_id, all_player_ids):
         super().__init__(timeout=None)
@@ -226,4 +226,57 @@ class MasterDashboardView(ui.View):
         await interaction.response.send_message("규모 선택:", view=view, ephemeral=True)
 
     @ui.button(label="⚔️ 드래프트 시작", style=discord.ButtonStyle.danger, row=0)
-    async def btn_
+    async def btn_draft(self, interaction, button):
+        if not await is_admin(interaction): return
+        if not interaction.user.voice: return await interaction.response.send_message("음성채널 필수", ephemeral=True)
+        v_members = [m for m in interaction.user.voice.channel.members if not m.bot and not (m.voice.self_mute or m.voice.mute)]
+        if len(v_members) != 10: return await interaction.response.send_message(f"마이크 켠 10명 필요", ephemeral=True)
+        
+        view = ui.View()
+        sel = ui.Select(cls=ui.UserSelect, placeholder="주장 2명 선택", min_values=2, max_values=2)
+        async def sel_cb(i):
+            l1, l2 = sel.values
+            res = supabase.table("users").select("*").in_("discord_id", [m.id for m in v_members]).execute()
+            db_data = {r['discord_id']: r for r in res.data}
+            pool = {m.id: {"n": m.display_name, "t_short": db_data[m.id]['tier'][0], "t_emoji": TIER_EMOJI.get(db_data[m.id]['tier'], "⚪"),
+                          "lines": f"{db_data[m.id]['main_line']}/{db_data[m.id]['sub_line']}", "score": TIER_SCORE.get(db_data[m.id]['tier'], 3),
+                          "p_count": db_data[m.id].get('participation_count', 0)} for m in v_members if m.id not in [l1.id, l2.id]}
+            await i.channel.send(f"⚔️ **드래프트 시작!**", view=DraftView(pool, l1, l2, i.user.id, [m.id for m in v_members]))
+            await i.response.edit_message(content="✅ 생성됨", view=None)
+        sel.callback = sel_cb
+        view.add_item(sel)
+        await interaction.response.send_message("주장 선택:", view=view, ephemeral=True)
+
+    @ui.button(label="🏅 결과 기록 (승점)", style=discord.ButtonStyle.success, row=1)
+    async def btn_win(self, interaction, button):
+        if not await is_admin(interaction): return
+        if not last_match_teams[1]: return await interaction.response.send_message("기록 없음", ephemeral=True)
+        view = ui.View()
+        sel = ui.Select(placeholder="승리팀", options=[discord.SelectOption(label="1팀", value="1"), discord.SelectOption(label="2팀", value="2")])
+        async def cb(i):
+            for pid in last_match_teams[int(sel.values[0])]: supabase.rpc('increment_win', {'user_id': pid}).execute()
+            await i.response.edit_message(content="✅ 승리 기록완료!", view=None)
+        sel.callback = cb
+        view.add_item(sel)
+        await interaction.response.send_message("승리팀 선택:", view=view, ephemeral=True)
+
+    @ui.button(label="⚙️ 운영진 관리", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_adm(self, interaction, button):
+        if not interaction.user.guild_permissions.administrator: return
+        view = ui.View()
+        s1 = ui.Select(cls=ui.UserSelect, placeholder="임명", row=0)
+        async def c1(i): supabase.table("users").update({"is_admin": True}).eq("discord_id", s1.values[0].id).execute()
+        s1.callback = c1; view.add_item(s1)
+        s2 = ui.Select(cls=ui.UserSelect, placeholder="박탈", row=1)
+        async def c2(i): supabase.table("users").update({"is_admin": False}).eq("discord_id", s2.values[0].id).execute()
+        s2.callback = c2; view.add_item(s2)
+        await interaction.response.send_message("권한 관리:", view=view, ephemeral=True)
+
+@bot.command(name="1")
+async def master(ctx):
+    try: await ctx.message.delete()
+    except: pass
+    await ctx.send("⚡ **VOLT 마스터 통제실**", view=MasterDashboardView())
+
+keep_alive()
+bot.run(BOT_TOKEN)
