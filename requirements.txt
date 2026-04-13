@@ -1,5 +1,4 @@
-discord.py>=2.4.0,<3.0.0
-Flask>=3.0.0,<4.0.0
-psycopg2-binary>=2.9.9,<3.0.0
-pytz>=2024.1
+discord.py
 supabase
+python-dotenv
+Flask
