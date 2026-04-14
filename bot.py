@@ -14,7 +14,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# 📢 선우 님 서버 실제 채널 ID
+# 📢 선우 님 서버 실제 채널 ID 반영 완료
 RECRUIT_CHANNEL_ID = 1493116057488199741
 REGISTER_CHANNEL_ID = 1493394604131745912
 RANKING_CHANNEL_ID = 1493138106868568075
@@ -46,17 +46,38 @@ async def update_recruitment_msg():
         try: await active_recruitment["message"].edit(content=content)
         except: pass
 
-# --- [3. Views: 소환사 등록] ---
+# --- [3. Views: 소환사 등록 (티어 -> 주라인 -> 부라인)] ---
 class RegisterFlow(ui.View):
-    def __init__(self, rid): super().__init__(timeout=180); self.rid = rid; self.t = None
-    @ui.select(placeholder="티어 선택", options=[discord.SelectOption(label=k) for k in TIER_SCORE.keys()])
-    async def s_t(self, i, s): self.t = s.values[0]; await i.response.edit_message(content=f"티어: {self.t}\n라인 선택", view=self)
-    @ui.select(placeholder="라인 선택", options=[discord.SelectOption(label=l, value=l) for l in ["TOP", "JUG", "MID", "ADC", "SUP"]])
-    async def s_m(self, i, s):
-        supabase.table("users").upsert({"discord_id": i.user.id, "discord_name": i.user.display_name, "riot_id": self.rid, "tier": self.t, "main_line": s.values[0]}).execute()
-        await i.response.edit_message(content="✅ 등록 완료!", view=None)
+    def __init__(self, rid): 
+        super().__init__(timeout=180)
+        self.rid = rid
+        self.t = None
+        self.m_line = None
+    
+    @ui.select(placeholder="1. 자신의 티어를 선택하세요", options=[discord.SelectOption(label=k) for k in TIER_SCORE.keys()])
+    async def s_t(self, i, s): 
+        self.t = s.values[0]
+        await i.response.edit_message(content=f"✅ 티어: **{self.t}**\n2. **주라인**을 선택해 주세요.", view=self)
 
-# --- [4. Views: 드래프트 (5x2 정렬)] ---
+    @ui.select(placeholder="2. 주라인 선택", options=[discord.SelectOption(label=l) for l in ["TOP", "JUG", "MID", "ADC", "SUP"]])
+    async def s_m(self, i, s):
+        self.m_line = s.values[0]
+        await i.response.edit_message(content=f"✅ 주라인: **{self.m_line}**\n3. **부라인**을 선택해 주세요.", view=self)
+
+    @ui.select(placeholder="3. 부라인 선택", options=[discord.SelectOption(label=l) for l in ["TOP", "JUG", "MID", "ADC", "SUP", "ALL"]])
+    async def s_s(self, i, s):
+        sub_line = s.values[0]
+        supabase.table("users").upsert({
+            "discord_id": i.user.id, 
+            "discord_name": i.user.display_name, 
+            "riot_id": self.rid, 
+            "tier": self.t, 
+            "main_line": self.m_line,
+            "sub_line": sub_line
+        }).execute()
+        await i.response.edit_message(content=f"✅ **등록 완료!**\n티어: {self.t} / 주라인: {self.m_line} / 부라인: {sub_line}", view=None)
+
+# --- [4. Views: 드래프트 (5명씩 2줄 정렬)] ---
 class DraftView(ui.View):
     def __init__(self, p, l1, l2, ids):
         super().__init__(timeout=None)
@@ -79,67 +100,54 @@ class DraftView(ui.View):
 
     async def pick_callback(self, i):
         curr_lds = self.l[self.order[self.idx]]
-        if i.user.id != curr_lds.id: return await i.response.send_message(f"{curr_lds.display_name} 차례!", ephemeral=True)
+        if i.user.id != curr_lds.id: return await i.response.send_message(f"{curr_lds.display_name} 주장님 차례!", ephemeral=True)
         p_id = int(i.data['custom_id']); p_data = self.p.pop(p_id); t_num = self.order[self.idx]
         self.teams[t_num].append(f"· **{p_data['n']}** ({p_data['t_short']})")
         self.t_ids[t_num].append(p_id); self.names[t_num].append(p_data['n']); self.idx += 1
         if not self.p or self.idx >= len(self.order): await self.finish(i)
-        else: self.create_buttons(); await i.response.edit_message(content=f"🔵 **{self.l[self.order[self.idx]].display_name}** 선택!", view=self)
+        else: self.create_buttons(); await i.response.edit_message(content=f"🔵 **{self.l[self.order[self.idx]].display_name}** 주장님 선택!", view=self)
 
     async def finish(self, i):
         global current_match
         current_match = {"ids": self.ids, "team1": self.t_ids[1], "team2": self.t_ids[2], "names1": self.names[1], "names2": self.names[2]}
-        embed = discord.Embed(title="⚔️ 라인업 완료", color=0x5865F2)
+        embed = discord.Embed(title="⚔️ VOLT 내전 라인업 완료", color=0x5865F2)
         embed.add_field(name="🟦 1팀", value="\n".join(self.teams[1]), inline=False)
         embed.add_field(name="🟥 2팀", value="\n".join(self.teams[2]), inline=False)
         await bot.get_channel(DRAFT_CHANNEL_ID).send(embed=embed)
-        await i.response.edit_message(content="✅ 완료!", view=None)
+        await i.response.edit_message(content="✅ 완료! 드래프트 채널을 확인하세요.", view=None)
 
-# --- [5. Views: 명단 관리 (다중 선택 적용)] ---
+# --- [5. Views: 명단 관리 (다중 선택)] ---
 class ParticipantMultiSelectView(ui.View):
     def __init__(self, options, mode="add", follow_up=False):
         super().__init__(timeout=60)
         self.mode, self.follow_up = mode, follow_up
-        # 다중 선택 가능하게 설정 (최대 선택 수는 옵션 개수만큼)
-        sel = ui.Select(
-            placeholder=f"{'추가' if mode == 'add' else '제외'}할 소환사들을 모두 선택하세요",
-            min_values=1,
-            max_values=len(options),
-            options=options
-        )
-        sel.callback = self.select_callback
-        self.add_item(sel)
+        sel = ui.Select(placeholder=f"{'추가' if mode == 'add' else '제외'}할 소환사들을 체크하세요", min_values=1, max_values=len(options), options=options)
+        sel.callback = self.select_callback; self.add_item(sel)
 
     async def select_callback(self, i):
         selected_ids = [int(val) for val in i.data['values']]
-        
         if self.mode == "add":
             res = supabase.table("users").select("discord_id, discord_name").in_("discord_id", selected_ids).execute()
             for row in res.data:
-                uid, name = row['discord_id'], row['discord_name']
-                if not any(m.id == uid for m in active_recruitment["participants"]):
-                    user = i.guild.get_member(uid) or MockUser(uid, name)
-                    active_recruitment["participants"].append(user)
+                if not any(m.id == row['discord_id'] for m in active_recruitment["participants"]):
+                    active_recruitment["participants"].append(i.guild.get_member(row['discord_id']) or MockUser(row['discord_id'], row['discord_name']))
         else:
             active_recruitment["participants"] = [m for m in active_recruitment["participants"] if m.id not in selected_ids]
-
         await update_recruitment_msg()
         await i.response.edit_message(content=f"✅ {len(selected_ids)}명 처리 완료", view=NextActionView() if self.follow_up else None)
 
 class ParticipantEditRootView(ui.View):
     def __init__(self, follow_up=None): super().__init__(timeout=60); self.follow_up = follow_up
-    
     @ui.button(label="➕ 여러 명 추가", style=discord.ButtonStyle.success)
     async def add(self, i, b):
         res = supabase.table("users").select("discord_id, discord_name").execute()
         db_users = [u for u in res.data if u['discord_id'] not in [m.id for m in active_recruitment["participants"]]]
-        if not db_users: return await i.response.send_message("추가할 수 있는 인원이 없습니다.", ephemeral=True)
+        if not db_users: return await i.response.send_message("추가할 인원 없음", ephemeral=True)
         opts = [discord.SelectOption(label=u['discord_name'], value=str(u['discord_id'])) for u in db_users[:25]]
         await i.response.edit_message(content="추가할 인원을 모두 체크하세요:", view=ParticipantMultiSelectView(opts, "add", self.follow_up))
-
     @ui.button(label="➖ 여러 명 제외", style=discord.ButtonStyle.danger)
     async def rem(self, i, b):
-        if not active_recruitment["participants"]: return await i.response.send_message("제외할 인원이 없습니다.", ephemeral=True)
+        if not active_recruitment["participants"]: return await i.response.send_message("제외할 인원 없음", ephemeral=True)
         opts = [discord.SelectOption(label=m.display_name, value=str(m.id)) for m in active_recruitment["participants"]]
         await i.response.edit_message(content="제외할 인원을 모두 체크하세요:", view=ParticipantMultiSelectView(opts, "rem", self.follow_up))
 
@@ -155,28 +163,23 @@ class NextActionView(ui.View):
             lds = [m for m in p_list if m.id in [int(v) for v in sel.values]]
             db = {r['discord_id']: r for r in supabase.table("users").select("*").in_("discord_id", [m.id for m in p_list]).execute().data}
             pool = {m.id: {"n": m.display_name, "t_short": db[m.id]['tier'][0], "score": TIER_SCORE.get(db[m.id]['tier'], 3)} for m in p_list if m.id not in [l.id for l in lds]}
-            await bot.get_channel(DRAFT_CHANNEL_ID).send("⚔️ 재드래프트 시작!", view=DraftView(pool, lds[0], lds[1], [m.id for m in p_list]))
+            await bot.get_channel(DRAFT_CHANNEL_ID).send("⚔️ 재드래프트!", view=DraftView(pool, lds[0], lds[1], [m.id for m in p_list]))
             await i2.response.edit_message(content="✅ 완료", view=None)
         sel.callback = cb; v.add_item(sel); await i.response.edit_message(content="새 주장 선택:", view=v)
-    
     @ui.button(label="🔄 리매치 (팀고정)", style=discord.ButtonStyle.success, row=0)
     async def rm(self, i, b):
         embed = discord.Embed(title="⚔️ 리매치 시작!", color=0xed4245)
         embed.add_field(name="🟦 1팀", value="\n".join(current_match["names1"])); embed.add_field(name="🟥 2팀", value="\n".join(current_match["names2"]))
         await bot.get_channel(DRAFT_CHANNEL_ID).send(embed=embed); await i.response.edit_message(content="✅ 완료", view=None)
-
     @ui.button(label="🔀 셔플 (랜덤팀)", style=discord.ButtonStyle.secondary, row=1)
     async def sf(self, i, b):
         all_ids = current_match["team1"] + current_match["team2"]; random.shuffle(all_ids)
         t1, t2 = all_ids[:5], all_ids[5:]; db = {r['discord_id']: r for r in supabase.table("users").select("*").in_("discord_id", all_ids).execute().data}
         embed = discord.Embed(title="🔀 셔플 완료", color=0x9b59b6)
-        embed.add_field(name="🟦 1팀", value="\n".join([f"· {db[u]['discord_name']}" for u in t1]))
-        embed.add_field(name="🟥 2팀", value="\n".join([f"· {db[u]['discord_name']}" for u in t2]))
+        embed.add_field(name="🟦 1팀", value="\n".join([f"· {db[u]['discord_name']}" for u in t1])); embed.add_field(name="🟥 2팀", value="\n".join([f"· {db[u]['discord_name']}" for u in t2]))
         await bot.get_channel(DRAFT_CHANNEL_ID).send(embed=embed); await i.response.edit_message(content="✅ 완료", view=None)
-
-    @ui.button(label="📝 명단 수정", style=discord.ButtonStyle.secondary, row=1)
-    async def ed(self, i, b): await i.response.edit_message(content="수정 중...", view=ParticipantEditRootView(follow_up=True))
-
+    @ui.button(label="📝 명단 수정 후 다시하기", style=discord.ButtonStyle.secondary, row=1)
+    async def ed(self, i, b): await i.response.edit_message(content="명단 수정 중...", view=ParticipantEditRootView(follow_up=True))
     @ui.button(label="🏁 종료", style=discord.ButtonStyle.danger, row=2)
     async def en(self, i, b): active_recruitment["participants"] = []; await i.response.edit_message(content="🏁 종료됨.", view=None)
 
@@ -195,7 +198,7 @@ class MasterDashboardView(ui.View):
                 reg_v = ui.View(timeout=None); btn = ui.Button(label="등록/수정", style=discord.ButtonStyle.primary)
                 async def reg_click(i3):
                     m = ui.Modal(title="등록"); rid = ui.TextInput(label="ID"); m.add_item(rid)
-                    async def os(i4): await i4.response.send_message("입력:", view=RegisterFlow(rid.value), ephemeral=True)
+                    async def os(i4): await i4.response.send_message("정보 입력:", view=RegisterFlow(rid.value), ephemeral=True)
                     m.on_submit = os; await i3.response.send_modal(m)
                 btn.callback = reg_click; reg_v.add_item(btn); await bot.get_channel(REGISTER_CHANNEL_ID).send("⚡ **등록 센터**", view=reg_v)
             elif val == "rank": await bot.get_channel(RANKING_CHANNEL_ID).send("📊 랭킹 보드", view=RankingBoardView())
@@ -212,7 +215,7 @@ class MasterDashboardView(ui.View):
             lds = [m for m in p_list if m.id in [int(v) for v in sel.values]]
             db = {r['discord_id']: r for r in supabase.table("users").select("*").in_("discord_id", [m.id for m in p_list]).execute().data}
             pool = {m.id: {"n": m.display_name, "t_short": db[m.id]['tier'][0], "score": TIER_SCORE.get(db[m.id]['tier'], 3)} for m in p_list if m.id not in [l.id for l in lds]}
-            await bot.get_channel(DRAFT_CHANNEL_ID).send("⚔️ 드래프트!", view=DraftView(pool, lds[0], lds[1], [m.id for m in p_list]))
+            await bot.get_channel(DRAFT_CHANNEL_ID).send("⚔️ 드래프트 시작!", view=DraftView(pool, lds[0], lds[1], [m.id for m in p_list]))
             await i2.response.edit_message(content="✅ 채널 확인!", view=None)
         sel.callback = cb; v.add_item(sel); await i.response.send_message("주장 선택:", view=v, ephemeral=True)
 
@@ -224,7 +227,7 @@ class MasterDashboardView(ui.View):
             for pid in win_ids:
                 try: supabase.rpc('increment_win', {'user_id': pid}).execute()
                 except: pass
-            await i2.response.edit_message(content="✅ 기록 완료!", view=NextActionView())
+            await i2.response.edit_message(content="✅ 기록 완료! 다음 작업 선택:", view=NextActionView())
         sel.callback = cb; v.add_item(sel); await i.response.send_message("결과 선택:", view=v, ephemeral=True)
 
     @ui.button(label="📝 명단 수정", style=discord.ButtonStyle.secondary, row=2)
@@ -246,7 +249,10 @@ class JoinView(ui.View):
     @ui.button(label="신청/취소", style=discord.ButtonStyle.success)
     async def j(self, i, b):
         if i.user in active_recruitment["participants"]: active_recruitment["participants"].remove(i.user)
-        else: active_recruitment["participants"].append(i.user)
+        else:
+            res = supabase.table("users").select("discord_id").eq("discord_id", i.user.id).execute()
+            if not res.data: return await i.response.send_message("등록 먼저 하세요!", ephemeral=True)
+            active_recruitment["participants"].append(i.user)
         await i.response.send_message("✅ 완료", ephemeral=True); await update_recruitment_msg()
 
 class RankingBoardView(ui.View):
